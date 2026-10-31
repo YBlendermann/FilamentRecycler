@@ -1,28 +1,85 @@
-# FilamentRecycler – Temperaturtest V0.2
+# FilamentRecycler V0.4 — HMI + Machine Controller
 
-Zentrale USB-Steuerung: Raspberry Pi ↔ Mega 2560/RAMPS 1.6 und CrowPanel DIS07050H V3.0.
+**Experimentelles Testprojekt. Kein Aktor wird eingeschaltet.**
 
-## Enthalten
-- `firmware/ramps/mega_temp_usb/mega_temp_usb.ino`: reale NTC-Messung, keine Heiz-/Motoransteuerung
-- `raspberry/temp_bridge.py`: fragt Mega ab und überträgt Daten an das CrowPanel
-- `firmware/crowpanel/filament_temp_ui.h`: LVGL-9-Erweiterung, **kein allein kompilierbarer Sketch**
-- `scripts/flash_ramps.sh`: kompiliert und flasht Mega mit Arduino CLI
-- `scripts/run_bridge.sh`: startet die USB-Brücke
+Hardware: Raspberry Pi 4, Arduino Mega 2560 + RAMPS 1.6, CrowPanel DIS07050H V3.0 (ESP32-S3, 4 MB Flash/8 MB PSRAM), drei 100-kΩ-NTC-Sensoren an A13/A15/A14.
 
-## Voraussetzungen auf dem Pi
-`sudo apt install -y git python3-serial`
-Arduino CLI und `arduino:avr` müssen installiert sein.
+## Funktionen
 
-## Mega flashen
-`bash scripts/flash_ramps.sh /dev/ttyACM0`
+- Helles LVGL-9-Dashboard mit 3 Temperaturkarten, Motor-Sollwert, Filamentstatus und Systemkarte.
+- Detailseiten mit Verlaufsgrafiken, bildschirmfüllende Graphen, editierbare Solltemperaturen.
+- Einstellungen für je 3 PID-Parameter in 3 Zonen; Motor-Solldrehzahl und Filament-Solldurchmesser.
+- Bestätigungsdialoge für **START / PAUSE / STOP**; **Statussimulation** am Pi (`READY`, `PREHEAT`, `PAUSED`) ohne Heiz-/Motor-Ausgänge.
+- Raspberry Pi ist Konfigurations-Master. Änderungen in `raspberry/machine_config.json` (lokal, bewusst nicht in Git); beim Verbinden Übertragung an den Mega. Mega hält Kopie nur im RAM. Kein EEPROM-Schreiben.
+- Temperatur-Istwerte kommen vom Mega; Durchmesser-Istwert bleibt `ERR`, bis ein echter Sensor integriert ist. Graphenhistorie liegt nur im CrowPanel-RAM (60 Werte × 500 ms, ca. 30 s) und wird bei Neustart gelöscht.
+- Die Material-/Spulenseite ist vorerst eine Platzhalterseite.
 
-## Pi-USB-Brücke starten
-`bash scripts/run_bridge.sh`
+## GitHub → Raspberry Pi (nur Download)
 
-## CrowPanel
-Die UI-Headerdatei wird in das V3.0-Referenzprojekt von Elecrow eingebunden, das LVGL 9, GT911, PCA9557 und die RGB-Displayinitialisierung übernimmt. Datei in den Sketchordner kopieren, nach LVGL-Include `#include "filament_temp_ui.h"` ergänzen, nach vollständiger Hardware- und LVGL-Initialisierung `filament_ui_begin();` und in `loop()` `filament_ui_poll();` ergänzen. Hersteller-Demo-UI dabei deaktivieren; LVGL-Tick und `lv_timer_handler()` beibehalten.
+Die Dateien vom Windows-PC in dein Repository `YBlendermann/FilamentRecycler` hochladen und auf dem Raspberry Pi abrufen:
 
-Herstellerprojekt: https://github.com/Elecrow-RD/CrowPanel-5.0-HMI-ESP32-Display-800x480
+```bash
+cd ~/FilamentRecycler
+git pull --ff-only
+```
 
-## Hardware und Sicherheit
-NTC-Eingang A13, Mitte A15, Düse A14. Thermistorannahmen aus altem V0.4.1-Sketch: R25=100k, Beta=3950, Pull-up=4k7. `GET_TEMP` antwortet `TEMP,23.4,24.0,25.1`; ungültige Messwerte als `ERR`. Keine Heizungsfreigabe: Lastversorgung während Tests trennen.
+Wichtig: Die gesamte Verzeichnisstruktur aus diesem Paket übernehmen, nicht nur einzelne Header. Vorhandene `firmware/ramps/...`- und `scripts/...`-Dateien werden ersetzt.
+
+## 1. Mega V0.4 flashen
+
+Vorher die laufende USB-Brücke mit Ctrl+C beenden. Heizung und Motor elektrisch spannungsfrei lassen.
+
+```bash
+cd ~/FilamentRecycler
+bash scripts/flash_ramps.sh
+```
+
+Neue Mega-Firmware meldet `ID,RAMPS_CONFIG,0.4`. Die bisherige V0.2-Firmware ist für den neuen Controller **nicht kompatibel**. Siehe die Protokolländerung unten.
+
+## 2. CrowPanel flashen
+
+```bash
+cd ~/FilamentRecycler
+bash scripts/flash_crowpanel.sh
+```
+
+Das Script verwendet das von dir bereits erfolgreich verwendete **Elecrow-V3.0-LVGL-Beispiel** einschließlich LovyanGFX, GT911 und PCA9557 und ersetzt die Demo-UI durch `filament_temp_ui.h`. Es lädt Elecrow in `.vendor/` und erzeugt den Sketch in `.build/` (beides bewusst nicht in Git). Der erste Compile kann viele LVGL-Dateien übersetzen. Original-Flashbackup aufbewahren.
+
+**Ungetestete Kombination:** Diese V0.4-HMI wurde hier nicht auf einem echten CrowPanel kompiliert oder gestartet. Fehlerausgaben und LVGL-API-Abweichungen sind möglich. Der bereits bewährte V0.3-Stand bleibt dein Rückfallpunkt.
+
+## 3. Controller starten
+
+```bash
+sudo apt install -y python3-serial
+cd ~/FilamentRecycler
+bash scripts/run_controller.sh
+```
+
+Nicht gleichzeitig die alte `raspberry/temp_bridge.py` starten! Beide würden dieselben seriellen USB-Geräte öffnen. Ein erfolgreicher Start zeigt unter anderem `Mega connected; settings synchronized`. Die Ports werden per USB VID/PID identifiziert (Mega 2341:0042, CrowPanel CH340 1a86:7523).
+
+Falls du auf einem zweiten Pi einen anderen Mega-Klon verwendest, kannst du Ports explizit übergeben:
+
+```bash
+bash scripts/run_controller.sh --mega /dev/ttyACM0 --display /dev/ttyUSB0
+```
+
+## Kommunikationsprotokoll (115200 8N1 ASCII, LF)
+
+Mega: `HELLO` → `ID,RAMPS_CONFIG,0.4`; `GET_TEMP` → `TEMP,t1,t2,t3`; `CFG,TEMP,index,value`, `CFG,PID,index,KP|KI|KD,value`, `CFG,MOTOR,RPM,value`, `CFG,FILAMENT,TARGET,value` → `ACK,CFG`.
+
+CrowPanel: `HELLO`, `ACTION,START|PAUSE|STOP`, `SET,TEMP,index,value`, `SET,PID,index,KP|KI|KD,value`, `SET,MOTOR,RPM,value`, `SET,FILAMENT,TARGET,value`.
+
+Pi → CrowPanel:
+
+```
+STATE,PREHEAT,1,20.1,20.2,20.3,175.0,190.0,205.0,12.50,ERR,1.750
+PID,0,5.000,0.100,15.000
+PID,1,5.000,0.100,15.000
+PID,2,5.000,0.100,15.000
+```
+
+Der Pi sendet `STATE` alle 500 ms. `ERR` bedeutet ungültigen oder fehlenden Sensor. Empfangs-Timeout nach 2,5 Sekunden markiert Pi OFFLINE. Ungültige Werte werden vom Pi verworfen, nicht gespeichert.
+
+## Sicherheit und nächste Schritte
+
+**START, PAUSE und STOP sind in V0.4 ausschließlich simulierte Prozesszustände.** Der Mega hat keine aktiven Last-Ausgänge. Für die echte Temperaturregelung, Heizer, Förderschneckenmotor und später Fördermenge sind unabhängige Übertemperaturabschaltung, Sensorfehlerüberwachung, sicherer Anlauf, Hardware-Not-Aus, Motor-Watchdog, Test der Ausgangsstufen sowie eine eindeutige Zustandsmaschine erforderlich. Die angezeigten PID-Werte sind momentan nur gespeicherte Parameter, **keine laufende PID-Regelung**. Die Drehzahl ist ein Sollwert; die Fördermenge in g/h erfordert Kalibrierung.
