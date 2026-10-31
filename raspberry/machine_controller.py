@@ -172,7 +172,7 @@ class Controller:
                     if not self.mega_online or self.mode != 'READY' or self.motor_test_active:
                         raise ValueError('test not allowed')
                     hz = int(parts[2]); direction = int(parts[3])
-                    if not 50 <= hz <= 800 or direction not in (0, 1):
+                    if not 50 <= hz <= 1600 or direction not in (0, 1):
                         raise ValueError('invalid test setting')
                     self.motor_step_hz = hz
                     self.motor_forward = bool(direction)

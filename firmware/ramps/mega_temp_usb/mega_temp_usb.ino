@@ -18,7 +18,7 @@ char cmd[96]; uint8_t cmdLen = 0;
 unsigned long lastSample = 0;
 // RAMPS 1.6 E0 pin map (Mega2560), TMC2208 STEP/DIR standalone
 const uint8_t E0_STEP=26, E0_DIR=28, E0_ENABLE=24;
-const uint16_t TEST_MIN_HZ=50, TEST_MAX_HZ=800;
+const uint16_t TEST_MIN_HZ=50, TEST_MAX_HZ=1600;
 const unsigned long TEST_MAX_MS=15000UL;
 const unsigned long TEST_WATCHDOG_MS=1300UL;
 bool testRunning=false, testForward=true;

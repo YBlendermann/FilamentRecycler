@@ -119,7 +119,7 @@ static void changeTestSpeed(lv_event_t* e){
   int delta=(int)(intptr_t)lv_event_get_user_data(e);
   motorTestHz+=delta;
   if(motorTestHz<50)motorTestHz=50;
-  if(motorTestHz>800)motorTestHz=800;
+  if(motorTestHz>1600)motorTestHz=1600;
   updateMotorTestUi();
 }
 static void toggleMotorDirection(lv_event_t*){
