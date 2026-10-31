@@ -1,5 +1,5 @@
 #pragma once
-/* FilamentRecycler HMI V0.5 - dark layout - CrowPanel DIS07050H V3.0, LVGL 9.
+/* FilamentRecycler HMI V0.7 - dark layout - CrowPanel DIS07050H V3.0, LVGL 9.
  * Included in Elecrow reference sketch after hardware initialization.
  * All actuator actions are SIMULATED by the Pi and confirmed on screen.
  */
@@ -22,8 +22,12 @@ static float pid_cfg[3][3]={{5,.1,15},{5,.1,15},{5,.1,15}};
 static float rpm=12.5f, diameter=NAN, diameterTarget=1.75f;
 static bool motorTestRunning=false, motorTestForward=true;
 static int motorTestHz=200;
+static int motorActualHz=0, motorRamp=500, motorMicrosteps=16, motorStepsPerRev=200;
+static float motorGearRatio=20.0f, screwPitch=0.0f, screwRpm=0.0f, screwAdvance=NAN;
+static bool motorJog=false, jogHeld=false;
 static uint32_t motorTestBegin=0, lastMotorKeep=0;
 static lv_obj_t *motorTestLabel=nullptr, *motorSpeedLabel=nullptr, *motorDirLabel=nullptr;
+static lv_obj_t *motorRpmLabel=nullptr,*motorFeedLabel=nullptr,*motorRampLabel=nullptr,*motorPitchLabel=nullptr,*motorMicroLabel=nullptr;
 static float histT[3][GRAPH_N], histD[GRAPH_N];
 static int histIdx=0, histCount=0;
 static uint32_t lastHistory=0, lastState=0, lastHello=0;
@@ -87,10 +91,11 @@ static void sendLine(const char *s){fr_uart.println(s);}
 static void drawPage();
 static void updateDisplay();
 static void nav(lv_event_t* e){
+  if(jogHeld){jogHeld=false;sendLine("MTEST,STOP");}
   page=(FrPage)(intptr_t)lv_event_get_user_data(e);drawPage();
 }
 static void chooseZone(lv_event_t* e){selectedZone=(int)(intptr_t)lv_event_get_user_data(e);drawPage();}
-static void chooseSetting(lv_event_t* e){settingPage=(FrSetting)(intptr_t)lv_event_get_user_data(e);drawPage();}
+static void chooseSetting(lv_event_t* e){if(jogHeld){jogHeld=false;sendLine("MTEST,STOP");}settingPage=(FrSetting)(intptr_t)lv_event_get_user_data(e);drawPage();}
 static void closeDialog(lv_event_t*){if(dialog){lv_obj_delete(dialog);dialog=nullptr;editVal=nullptr;}}
 static void confirmAction(lv_event_t*){
   if(!piOnline)return;
@@ -112,25 +117,56 @@ static void showConfirm(const char* action){
 static void clickStart(lv_event_t*){showConfirm("START");}
 static void clickPause(lv_event_t*){showConfirm("PAUSE");}
 static void clickStop(lv_event_t*){showConfirm("STOP");}
-static void openMotorSettings(lv_event_t*){settingPage=FR_SET_MOTOR;page=FR_SETTINGS;drawPage();}
+static void openMotorSettings(lv_event_t*){if(jogHeld){jogHeld=false;sendLine("MTEST,STOP");}settingPage=FR_SET_MOTOR;page=FR_SETTINGS;drawPage();}
 static void updateMotorTestUi();
 static void changeTestSpeed(lv_event_t* e){
-  if(motorTestRunning)return;
+  if(motorTestRunning || jogHeld)return;
   int delta=(int)(intptr_t)lv_event_get_user_data(e);
   motorTestHz+=delta;
   if(motorTestHz<50)motorTestHz=50;
-  if(motorTestHz>1600)motorTestHz=1600;
+  if(motorTestHz>2500)motorTestHz=2500;
   updateMotorTestUi();
 }
 static void toggleMotorDirection(lv_event_t*){
-  if(motorTestRunning)return;
+  if(motorTestRunning || jogHeld)return;
   motorTestForward=!motorTestForward;
   updateMotorTestUi();
 }
-static void stopMotorTest(lv_event_t*){sendLine("MTEST,STOP");}
+static void stopMotorTest(lv_event_t*){jogHeld=false;sendLine("MTEST,STOP");}
+static void jogMotorEvent(lv_event_t* e){
+  lv_event_code_t event=lv_event_get_code(e);
+  if(event==LV_EVENT_PRESSED){
+    if(dialog || !piOnline || !megaOnline || motorTestRunning || jogHeld)return;
+    jogHeld=true;
+    char cmd[64];snprintf(cmd,sizeof(cmd),"MTEST,START,%d,%d,%d,1",motorTestHz,motorTestForward?1:0,motorRamp);
+    sendLine(cmd);motorTestBegin=millis();lastMotorKeep=0;
+  }else if(event==LV_EVENT_RELEASED || event==LV_EVENT_PRESS_LOST){
+    if(jogHeld){jogHeld=false;sendLine("MTEST,STOP");}
+  }
+}
+static void changeRamp(lv_event_t* e){
+  if(motorTestRunning || jogHeld)return;
+  int delta=(int)(intptr_t)lv_event_get_user_data(e);
+  motorRamp+=delta;
+  if(motorRamp<100)motorRamp=100;
+  if(motorRamp>5000)motorRamp=5000;
+  char cmd[48];snprintf(cmd,sizeof(cmd),"SET,MOTOR,RAMP,%d",motorRamp);sendLine(cmd);
+  updateMotorTestUi();
+}
+static void changeMicrosteps(lv_event_t*){
+  if(motorTestRunning || jogHeld)return;
+  // This changes the CALCULATION ONLY: microsteps must match RAMPS jumper wiring.
+  const int possible[]={1,2,4,8,16,32,64,128,256};
+  int idx=0;for(int i=0;i<9;i++)if(possible[i]==motorMicrosteps){idx=i;break;}
+  motorMicrosteps=possible[(idx+1)%9];
+  char cmd[48];snprintf(cmd,sizeof(cmd),"SET,MOTOR,MICROSTEPS,%d",motorMicrosteps);sendLine(cmd);
+  updateMotorTestUi();
+}
+static void editPitch(lv_event_t*);
+
 static void confirmMotorTest(lv_event_t*){
   if(!piOnline || !megaOnline){closeDialog(nullptr);return;}
-  char cmd[48];snprintf(cmd,sizeof(cmd),"MTEST,START,%d,%d",motorTestHz,motorTestForward?1:0);
+  char cmd[48];snprintf(cmd,sizeof(cmd),"MTEST,START,%d,%d,%d,0",motorTestHz,motorTestForward?1:0,motorRamp);
   sendLine(cmd);
   motorTestBegin=millis();lastMotorKeep=0;
   closeDialog(nullptr);
@@ -177,6 +213,10 @@ static void openEditor(const char* title,const char* command,float value,float m
   button(dialog,"Speichern",216,188,172,46,C_BLUE,saveEditor);
 }
 // Code (1xx): temperature, (2xx): PID; (300): RPM; (400): filament target.
+static void editPitch(lv_event_t*){
+  if(motorTestRunning || jogHeld)return;
+  openEditor("Schneckensteigung (mm)","SET,MOTOR,PITCH",screwPitch,0,30,.5f);
+}
 static void onEdit(lv_event_t* e){
   int code=(int)(intptr_t)lv_event_get_user_data(e),zone=selectedZone;
   char cmd[48];
@@ -333,7 +373,7 @@ static void drawDashboard(){
   feedValue[0]=label(root,"-- g/min",515,115,C_ORANGE);
   label(root,"Filamentzug",408,155,C_MUTED);
   feedValue[1]=label(root,"-- m/min",408,176,C_ORANGE);
-  label(root,"Soll-RPM",522,155,C_MUTED);
+  label(root,"Axial theor.",522,155,C_MUTED);
   feedValue[2]=label(root,"-- rpm",522,176,C_TEXT);
   // Cooling fan percentage unavailable until hardware module is installed.
   fanIcon(root,699,96,C_ORANGE);
@@ -352,8 +392,8 @@ static void drawDashboard(){
   dashAux[4]=label(root,"--",593,309,C_TEXT);
   label(root,"Temperatursensoren",468,341,C_MUTED);
   dashAux[5]=label(root,"--",650,341,C_TEXT);
-  label(root,"Aktoren",468,373,C_MUTED);
-  label(root,"TEST / AUS",593,373,C_ORANGE);
+  label(root,"E0-Motor",468,373,C_MUTED);
+  dashAux[6]=label(root,"TEST / AUS",593,373,C_ORANGE);
   drawFooter();
 }
 static void drawTemperature(){
@@ -406,17 +446,30 @@ static void drawSettings(){
       button(p,"Aendern",423,115+i*65,141,43,C_BLUE,onEdit,(void*)(intptr_t)(200+i));
     }
   }else if(settingPage==FR_SET_MOTOR){
-    label(p,"E0 - TMC2208 MOTORTEST",19,12,C_TEXT,true);
-    label(p,"STEP-Frequenz (kein gemessener RPM-Wert)",19,55,C_MUTED);
-    button(p,"-50",18,85,100,47,0x2A343E,changeTestSpeed,(void*)(intptr_t)-50);
-    motorSpeedLabel=label(p,"200 STEP/s",159,92,C_ORANGE,true);
-    button(p,"+50",450,85,120,47,0x2A343E,changeTestSpeed,(void*)(intptr_t)50);
-    label(p,"Drehrichtung (nur im Stillstand)",19,145,C_MUTED);
-    button(p,"Richtung wechseln",19,171,200,43,0x2A343E,toggleMotorDirection);
-    motorDirLabel=label(p,"Vorwaerts",252,177,C_TEXT);
-    button(p,LV_SYMBOL_PLAY " MOTOR START",19,236,244,52,C_GREEN,startMotorTest);
-    button(p,LV_SYMBOL_STOP " MOTOR STOP",278,236,286,52,C_RED,stopMotorTest);
-    motorTestLabel=label(p,"Teststatus: --",20,311,C_MUTED);
+    label(p,"E0  |  MOTORTEST",17,10,C_TEXT,true);
+    label(p,"Sollfrequenz",18,48,C_MUTED);
+    button(p,"-50",17,70,84,42,0x2A343E,changeTestSpeed,(void*)(intptr_t)-50);
+    motorSpeedLabel=label(p,"200 STEP/s",119,76,C_ORANGE,true);
+    button(p,"+50",465,70,107,42,0x2A343E,changeTestSpeed,(void*)(intptr_t)50);
+    motorRpmLabel=label(p,"Ausgang: -- U/min",18,123,C_TEXT);
+    motorFeedLabel=label(p,"Axial theor.: -- mm/min",265,123,C_MUTED);
+    label(p,"Anfahrrampe STEP/s^2",18,155,C_MUTED);
+    button(p,"-100",17,176,82,36,0x2A343E,changeRamp,(void*)(intptr_t)-100);
+    motorRampLabel=label(p,"500",126,183,C_ORANGE);
+    button(p,"+100",214,176,86,36,0x2A343E,changeRamp,(void*)(intptr_t)100);
+    button(p,"Richtung",324,176,102,36,0x2A343E,toggleMotorDirection);
+    motorDirLabel=label(p,"Vorwaerts",439,185,C_MUTED);
+    button(p,LV_SYMBOL_PLAY " 15s TEST",17,226,173,44,C_GREEN,startMotorTest);
+    lv_obj_t *hold=button(p,LV_SYMBOL_PLAY " HALTEN",204,226,176,44,C_ORANGE,nullptr);
+    lv_obj_add_event_cb(hold,jogMotorEvent,LV_EVENT_PRESSED,nullptr);
+    lv_obj_add_event_cb(hold,jogMotorEvent,LV_EVENT_RELEASED,nullptr);
+    lv_obj_add_event_cb(hold,jogMotorEvent,LV_EVENT_PRESS_LOST,nullptr);
+    button(p,LV_SYMBOL_STOP " STOP",391,226,182,44,C_RED,stopMotorTest);
+    motorTestLabel=label(p,"Teststatus: AUS",18,277,C_MUTED);
+    button(p,"uSteps",17,306,84,36,0x2A343E,changeMicrosteps);
+    motorMicroLabel=label(p,"1/16",107,315,C_MUTED);
+    button(p,"Steigung",207,306,95,36,0x2A343E,editPitch);
+    motorPitchLabel=label(p,"nicht bekannt",315,315,C_MUTED);
   }else{
     label(p,"SYSTEM",20,17,C_TEXT,true);
     detailLabels[0]=label(p,"Raspberry Pi: --",20,90,C_TEXT);
@@ -457,6 +510,7 @@ static void drawPage(){
   memset(graphSeries,0,sizeof(graphSeries));
   dialog=nullptr;editVal=nullptr;statusLabel=nullptr;
   motorTestLabel=nullptr;motorSpeedLabel=nullptr;motorDirLabel=nullptr;
+  motorRpmLabel=nullptr;motorFeedLabel=nullptr;motorRampLabel=nullptr;motorPitchLabel=nullptr;motorMicroLabel=nullptr;
   switch(page){
     case FR_DASH:drawDashboard();break;
     case FR_TEMP:drawTemperature();break;
@@ -469,10 +523,26 @@ static void drawPage(){
 }
 static void setLabel(lv_obj_t* o,const char* str){if(o)lv_label_set_text(o,str);}
 static void updateMotorTestUi(){
-  char buf[56];snprintf(buf,sizeof(buf),"%d STEP/s",motorTestHz);setLabel(motorSpeedLabel,buf);
+  char buf[80];snprintf(buf,sizeof(buf),"%d STEP/s",motorTestHz);setLabel(motorSpeedLabel,buf);
   setLabel(motorDirLabel,motorTestForward?"Vorwaerts":"Rueckwaerts");
-  setLabel(motorTestLabel,motorTestRunning?"Teststatus: MOTOR LAEUFT":"Teststatus: MOTOR AUS");
+  snprintf(buf,sizeof(buf),"%d",motorRamp);setLabel(motorRampLabel,buf);
+  snprintf(buf,sizeof(buf),"1/%d",motorMicrosteps);setLabel(motorMicroLabel,buf);
+  if(screwPitch>0)snprintf(buf,sizeof(buf),"%.1f mm",screwPitch);
+  else snprintf(buf,sizeof(buf),"unbekannt");
+  setLabel(motorPitchLabel,buf);
+  if(motorTestRunning){
+    snprintf(buf,sizeof(buf),"Motor: %.1f | Schnecke: %.3f U/min",screwRpm*motorGearRatio,screwRpm);
+    setLabel(motorRpmLabel,buf);
+    if(isfinite(screwAdvance))snprintf(buf,sizeof(buf),"Axial theor.: %.2f mm/min",screwAdvance);
+    else snprintf(buf,sizeof(buf),"Axial theor.: -- mm/min");
+    setLabel(motorFeedLabel,buf);
+  }else{
+    setLabel(motorRpmLabel,"Motor: 0 | Schnecke: 0 U/min");
+    setLabel(motorFeedLabel,"Axial theor.: -- mm/min");
+  }
+  setLabel(motorTestLabel,motorTestRunning?(motorJog?"TIPPBETRIEB AKTIV":"15s-TEST LAEUFT"):"Teststatus: AUS");
 }
+
 static void updateDisplay(){
   char buf[80];
   updateMotorTestUi();
@@ -489,10 +559,14 @@ static void updateDisplay(){
       setLabel(dashboardValue[i],buf);
       snprintf(buf,sizeof(buf),"Soll %.0f C",desired[i]);setLabel(dashAux[i],buf);
     }
-    // Only command target, not measured RPM: until encoder feedback exists.
-    setLabel(dashboardValue[3],"-- rpm");
+    // Estimated rotational speed based on commanded STEP rate, NOT encoder feedback.
+    if(motorTestRunning)snprintf(buf,sizeof(buf),"%.2f rpm",screwRpm);
+    else snprintf(buf,sizeof(buf),"0.00 rpm");
+    setLabel(dashboardValue[3],buf);
     setLabel(feedValue[0],"-- g/min");setLabel(feedValue[1],"-- m/min");
-    snprintf(buf,sizeof(buf),"%.1f",rpm);setLabel(feedValue[2],buf);
+    if(isfinite(screwAdvance)&&motorTestRunning)snprintf(buf,sizeof(buf),"%.1f mm/min",screwAdvance);
+    else snprintf(buf,sizeof(buf),"-- mm/min");
+    setLabel(feedValue[2],buf);
     setLabel(coolValue,"-- %");
     if(isfinite(diameter))snprintf(buf,sizeof(buf),"%.2f mm",diameter);
     else snprintf(buf,sizeof(buf),"-- mm");
@@ -503,6 +577,7 @@ static void updateDisplay(){
     bool sensors=megaOnline;
     for(int i=0;i<3;i++)sensors &= isfinite(actual[i]);
     setLabel(dashAux[5],sensors?"OK":"PRUEFEN");
+    setLabel(dashAux[6],motorTestRunning?"TEST LAEUFT":"TEST / AUS");
   }else if(page==FR_TEMP || page==FR_GRAPH_TEMP){
     snprintf(buf,sizeof(buf),"Ist: %s",isfinite(actual[selectedZone])?"":"ERR");
     if(isfinite(actual[selectedZone]))snprintf(buf,sizeof(buf),"Ist: %.1f C",actual[selectedZone]);
@@ -538,11 +613,22 @@ static void addHistory(){
 static void processLine(char *line){
   if(!strcmp(line,"HELLO")){sendLine("ID,HMI,0.4");return;}
   if(!strcmp(line,"ACK,SAVED"))return;
+  if(!strncmp(line,"MOTOR,CFG,",10)){
+    int us=16,st=200,ramp=500;float gear=20,pitch=0;
+    if(sscanf(line,"MOTOR,CFG,%d,%d,%f,%f,%d",&us,&st,&gear,&pitch,&ramp)==5 &&
+       us>=1 && st>0 && gear>0){
+      motorMicrosteps=us;motorStepsPerRev=st;motorGearRatio=gear;screwPitch=pitch;motorRamp=ramp;
+      updateMotorTestUi();
+    }
+    return;
+  }
   if(!strncmp(line,"MOTOR,TEST,",11)){
-    int state=0,hz=0,dir=0;
-    if(sscanf(line,"MOTOR,TEST,%d,%d,%d",&state,&hz,&dir)==3){
-      motorTestRunning=(state==1);
-      if(motorTestRunning){motorTestHz=hz;motorTestForward=dir==1;}
+    int state=0,hz=0,dir=0,current=0,jog=0,ramp=500;
+    float outRpm=0,axial=0;char axialToken[24]={};
+    if(sscanf(line,"MOTOR,TEST,%d,%d,%d,%d,%d,%d,%f,%23[^,]",&state,&hz,&dir,&current,&jog,&ramp,&outRpm,axialToken)==8){
+      motorTestRunning=(state==1);motorActualHz=current;motorJog=(jog==1);motorRamp=ramp;
+      motorTestHz=hz;motorTestForward=(dir==1);screwRpm=outRpm;
+      screwAdvance=strcmp(axialToken,"ERR")==0?NAN:atof(axialToken);
       updateMotorTestUi();
     }
     return;
@@ -581,9 +667,11 @@ static void filament_ui_begin(){
   page=FR_DASH;drawPage();sendLine("HELLO");
 }
 static void filament_ui_poll(){
-  if(motorTestRunning && piOnline && (uint32_t)(millis()-motorTestBegin)<15000UL &&
-     (uint32_t)(millis()-lastMotorKeep)>=350UL){
-    lastMotorKeep=millis();sendLine("MTEST,KEEP");
+  // Jog heartbeat comes ONLY from a physically held touchscreen button.
+  if(piOnline && (uint32_t)(millis()-motorTestBegin)<15000UL &&
+     (uint32_t)(millis()-lastMotorKeep)>=180UL){
+    if(jogHeld){lastMotorKeep=millis();sendLine("MTEST,HOLD");}
+    else if(motorTestRunning && !motorJog){lastMotorKeep=millis();sendLine("MTEST,KEEP");}
   }
   int budget=192;
   while(budget-- && fr_uart.available()){
@@ -598,6 +686,7 @@ static void filament_ui_poll(){
   if(piOnline && (uint32_t)(millis()-lastState)>2500){
     piOnline=false;megaOnline=false;
     motorTestRunning=false;
+    jogHeld=false;
     for(int i=0;i<3;i++)actual[i]=NAN;
     updateDisplay();
   }

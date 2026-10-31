@@ -18,32 +18,50 @@ char cmd[96]; uint8_t cmdLen = 0;
 unsigned long lastSample = 0;
 // RAMPS 1.6 E0 pin map (Mega2560), TMC2208 STEP/DIR standalone
 const uint8_t E0_STEP=26, E0_DIR=28, E0_ENABLE=24;
-const uint16_t TEST_MIN_HZ=50, TEST_MAX_HZ=1600;
+// The E0 motor is a TEST actuator only: heaters remain disabled.
+const uint16_t TEST_MIN_HZ=50, TEST_MAX_HZ=2500;
 const unsigned long TEST_MAX_MS=15000UL;
-const unsigned long TEST_WATCHDOG_MS=1300UL;
-bool testRunning=false, testForward=true;
-uint16_t testHz=200;
-unsigned long testStart=0, testKeep=0, lastStepUs=0, lastMotorReport=0;
+const unsigned long TIMED_WATCHDOG_MS=1300UL;
+const unsigned long JOG_WATCHDOG_MS=600UL;
+const uint16_t RAMP_MIN=100, RAMP_MAX=5000; // STEP/s per second
+bool testRunning=false, testForward=true, testJog=false;
+uint16_t targetHz=200, rampHzPerSec=500;
+float currentHz=0.0f;
+unsigned long testStart=0, testKeep=0, lastStepUs=0, lastMotorReport=0, lastRampUs=0;
+
 void stopTest() {
-  testRunning=false;
+  testRunning=false; testJog=false; currentHz=0;
   digitalWrite(E0_ENABLE,HIGH);
   digitalWrite(E0_STEP,LOW);
 }
 void reportMotor() {
   Serial.print(F("MOTOR,TEST,")); Serial.print(testRunning?1:0);
-  Serial.print(','); Serial.print(testHz);
-  Serial.print(','); Serial.println(testForward?1:0);
+  Serial.print(','); Serial.print(targetHz);
+  Serial.print(','); Serial.print(testForward?1:0);
+  Serial.print(','); Serial.print((unsigned int)(currentHz+0.5f));
+  Serial.print(','); Serial.print(testJog?1:0);
+  Serial.print(','); Serial.println(rampHzPerSec);
 }
 void motorTick() {
-  if(!testRunning) return;
-  unsigned long now=millis();
-  if(now-testStart >= TEST_MAX_MS || now-testKeep >= TEST_WATCHDOG_MS){
-    stopTest(); Serial.println(F("ACK,MTEST,TIMEOUT")); return;
+  if(!testRunning)return;
+  unsigned long ms=millis();
+  if(ms-testStart>=TEST_MAX_MS ||
+     ms-testKeep>=(testJog?JOG_WATCHDOG_MS:TIMED_WATCHDOG_MS)) {
+    stopTest(); Serial.println(F("ACK,MTEST,TIMEOUT"));return;
   }
   unsigned long us=micros();
-  if((uint32_t)(us-lastStepUs)>=1000000UL/testHz){
+  unsigned long dt=us-lastRampUs;
+  if(dt>=1000UL){
+    // Fixed acceleration in STEP/s^2; time based and non-blocking.
+    float delta=(float)rampHzPerSec * ((float)dt/1000000.0f);
+    currentHz=fminf((float)targetHz,currentHz+delta);
+    lastRampUs=us;
+  }
+  if(currentHz<1.0f)return;
+  unsigned long interval=(unsigned long)(1000000.0f/currentHz);
+  if((unsigned long)(us-lastStepUs)>=interval){
     lastStepUs=us;
-    digitalWrite(E0_STEP,HIGH); delayMicroseconds(4); digitalWrite(E0_STEP,LOW);
+    digitalWrite(E0_STEP,HIGH); delayMicroseconds(4);digitalWrite(E0_STEP,LOW);
   }
 }
 
@@ -80,25 +98,28 @@ void handle(char *line) {
   if(!strcmp(line,"HELLO")) { Serial.println(F("ID,RAMPS_CONFIG,0.4")); return; }
   if(!strcmp(line,"PING")) { Serial.println(F("PONG")); return; }
   if(!strcmp(line,"GET_TEMP")) { sendTemps(); return; }
-  if(!strcmp(line,"MTEST,STOP")) { stopTest(); Serial.println(F("ACK,MTEST,STOP")); reportMotor(); return; }
-  if(!strcmp(line,"MTEST,KEEP")) {
-    if(testRunning) testKeep=millis();
+  if(!strcmp(line,"MTEST,STOP")) {stopTest();Serial.println(F("ACK,MTEST,STOP"));reportMotor();return;}
+  if(!strcmp(line,"MTEST,KEEP") || !strcmp(line,"MTEST,HOLD")) {
+    if(testRunning &&
+       ((testJog && !strcmp(line,"MTEST,HOLD")) ||
+        (!testJog && !strcmp(line,"MTEST,KEEP")))) testKeep=millis();
     return;
   }
-  if(!strcmp(line,"MTEST,STATUS")) { reportMotor(); return; }
+  if(!strcmp(line,"MTEST,STATUS")) {reportMotor();return;}
   if(!strncmp(line,"MTEST,START,",12)) {
-    // START,stepHz,direction (direction 0 or 1); reject malformed commands.
-    // Never allow motor to start on a stale or incomplete request.
-    unsigned int rate=0; int direction=-1; char tail='x';
-    if(sscanf(line,"MTEST,START,%u,%d%c",&rate,&direction,&tail)==2 &&
+    unsigned int rate=0,acceleration=0;int direction=-1,mode=-1;char tail='x';
+    // START, target STEP/s, direction, acceleration STEP/s^2, mode (0=timed 1=jog)
+    if(sscanf(line,"MTEST,START,%u,%d,%u,%d%c",&rate,&direction,&acceleration,&mode,&tail)==4 &&
        rate>=TEST_MIN_HZ && rate<=TEST_MAX_HZ &&
-       (direction==0 || direction==1) && !testRunning) {
-      testHz=(uint16_t)rate; testForward=(direction==1);
+       acceleration>=RAMP_MIN && acceleration<=RAMP_MAX &&
+       (direction==0 || direction==1) && (mode==0 || mode==1) && !testRunning) {
+      targetHz=(uint16_t)rate;testForward=(direction==1);
+      rampHzPerSec=(uint16_t)acceleration;testJog=(mode==1);
       digitalWrite(E0_DIR,testForward?HIGH:LOW);
       delayMicroseconds(20);
-      testStart=testKeep=millis(); lastStepUs=micros();
-      digitalWrite(E0_ENABLE,LOW); testRunning=true;
-      Serial.println(F("ACK,MTEST,START")); reportMotor();
+      testStart=testKeep=millis();lastStepUs=lastRampUs=micros();currentHz=0.0f;
+      digitalWrite(E0_ENABLE,LOW);testRunning=true;
+      Serial.println(F("ACK,MTEST,START"));reportMotor();
     } else Serial.println(F("ERR,MTEST,START"));
     return;
   }

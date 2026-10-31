@@ -16,6 +16,11 @@ DEFAULT = {
     "temperature_setpoints": [175.0, 190.0, 205.0],
     "pid": [[5.0, 0.10, 15.0], [5.0, 0.10, 15.0], [5.0, 0.10, 15.0]],
     "motor_rpm": 12.5,
+    "motor_microsteps": 16,
+    "motor_steps_per_rev": 200,
+    "motor_gear_ratio": 20.0,
+    "screw_pitch_mm": 0.0,  # 0: unknown; calculated axial advance hidden
+    "motor_ramp_hz_s": 500,
     "filament_target_mm": 1.75,
 }
 BAUD = 115200
@@ -44,6 +49,12 @@ def load_config(path):
         if len(zone) != 3: raise ValueError('Invalid PID zone')
         for v, hi in zip(zone, [100, 10, 200]): numeric(v, 0, hi)
     numeric(config['motor_rpm'], 0, 150)
+    if int(config['motor_microsteps']) not in (1, 2, 4, 8, 16, 32, 64, 128, 256):
+        raise ValueError('Invalid microstep configuration')
+    numeric(config['motor_steps_per_rev'], 100, 400)
+    numeric(config['motor_gear_ratio'], 1, 200)
+    numeric(config['screw_pitch_mm'], 0, 30)
+    numeric(config['motor_ramp_hz_s'], 100, 5000)
     numeric(config['filament_target_mm'], 1, 3)
     return config
 
@@ -89,6 +100,8 @@ class Controller:
         self.motor_test_active = False
         self.motor_step_hz = 200
         self.motor_forward = True
+        self.motor_current_hz = 0
+        self.motor_jog = False
         self.last_motor_keep = 0.0
         self.last_motor_status = 0.0
 
@@ -106,9 +119,15 @@ class Controller:
         # Stop regardless of our cached running state.
         send(self.mega, 'MTEST,STOP')
         self.motor_test_active = False
+        self.motor_current_hz = 0
+        self.motor_jog = False
 
     def publish_motor(self):
-        send(self.hmi, f'MOTOR,TEST,{int(self.motor_test_active)},{self.motor_step_hz},{int(self.motor_forward)}')
+        rpm = self.motor_current_hz * 60.0 / (self.cfg['motor_steps_per_rev'] * self.cfg['motor_microsteps'] * self.cfg['motor_gear_ratio'])
+        pitch = self.cfg['screw_pitch_mm']
+        advance = rpm * pitch if pitch > 0 else None
+        extra = f'{rpm:.4f},{advance:.3f}' if advance is not None else f'{rpm:.4f},ERR'
+        send(self.hmi, f'MOTOR,TEST,{int(self.motor_test_active)},{self.motor_step_hz},{int(self.motor_forward)},{self.motor_current_hz},{int(self.motor_jog)},{self.cfg["motor_ramp_hz_s"]},{extra}')
 
     def publish(self):
         t = ','.join('ERR' if x is None else f'{x:.1f}' for x in self.temps)
@@ -116,6 +135,7 @@ class Controller:
         send(self.hmi, f'STATE,{self.mode},{int(self.mega_online)},{t},{sp},{self.cfg["motor_rpm"]:.2f},ERR,{self.cfg["filament_target_mm"]:.3f}')
         for i, values in enumerate(self.cfg['pid']):
             send(self.hmi, f'PID,{i},{values[0]:.3f},{values[1]:.3f},{values[2]:.3f}')
+        send(self.hmi, f'MOTOR,CFG,{self.cfg["motor_microsteps"]},{self.cfg["motor_steps_per_rev"]},{self.cfg["motor_gear_ratio"]:.2f},{self.cfg["screw_pitch_mm"]:.2f},{self.cfg["motor_ramp_hz_s"]}')
         self.publish_motor()
 
     def process_mega(self, line):
@@ -140,16 +160,19 @@ class Controller:
             self.mega_online = True
         elif line.startswith('MOTOR,TEST,'):
             p = line.split(',')
-            if len(p) == 5:
+            if len(p) == 8:
                 try:
                     self.motor_test_active = (p[2] == '1')
                     self.motor_step_hz = int(p[3])
                     self.motor_forward = (p[4] == '1')
+                    self.motor_current_hz = int(p[5])
+                    self.motor_jog = (p[6] == '1')
                     self.last_motor_status = time.monotonic()
                 except ValueError:
                     pass
         elif line.startswith('ACK,MTEST,TIMEOUT'):
             self.motor_test_active = False
+            self.motor_current_hz = 0
         elif line.startswith('ACK,') or line.startswith('ERR,'):
             print('Mega:', line, flush=True)
 
@@ -164,21 +187,25 @@ class Controller:
                 if command == 'STOP' and len(parts) == 2:
                     self.stop_motor_test()
                     send(self.hmi, 'ACK,MTEST,STOP')
-                elif command == 'KEEP' and len(parts) == 2:
-                    if self.motor_test_active:
+                elif command in ('KEEP', 'HOLD') and len(parts) == 2:
+                    if self.motor_test_active and ((command == 'HOLD') == self.motor_jog):
                         self.last_motor_keep = time.monotonic()
-                        send(self.mega, 'MTEST,KEEP')
-                elif command == 'START' and len(parts) == 4:
+                        send(self.mega, 'MTEST,' + command)
+                elif command == 'START' and len(parts) == 6:
                     if not self.mega_online or self.mode != 'READY' or self.motor_test_active:
                         raise ValueError('test not allowed')
                     hz = int(parts[2]); direction = int(parts[3])
-                    if not 50 <= hz <= 1600 or direction not in (0, 1):
+                    accel = int(parts[4]); jog = int(parts[5])
+                    if not 50 <= hz <= 2500 or direction not in (0, 1) or not 100 <= accel <= 5000 or jog not in (0, 1):
                         raise ValueError('invalid test setting')
                     self.motor_step_hz = hz
                     self.motor_forward = bool(direction)
                     self.motor_test_active = True
+                    self.motor_jog = bool(jog)
+                    self.motor_current_hz = 0
                     self.last_motor_keep = time.monotonic()
-                    send(self.mega, f'MTEST,START,{hz},{direction}')
+                    self.last_motor_status = time.monotonic()
+                    send(self.mega, f'MTEST,START,{hz},{direction},{accel},{jog}')
                     send(self.hmi, 'ACK,MTEST,START_SENT')
                 else:
                     raise ValueError('unknown motor test command')
@@ -204,6 +231,14 @@ class Controller:
                     name = parts[3]
                     axis = {'KP': 0, 'KI': 1, 'KD': 2}[name]
                     self.cfg['pid'][i][axis] = numeric(parts[4], 0, [100, 10, 200][axis])
+                elif parts[1:3] == ['MOTOR', 'RAMP'] and len(parts) == 4:
+                    self.cfg['motor_ramp_hz_s'] = int(numeric(parts[3], 100, 5000))
+                elif parts[1:3] == ['MOTOR', 'MICROSTEPS'] and len(parts) == 4:
+                    val = int(parts[3])
+                    if val not in (1, 2, 4, 8, 16, 32, 64, 128, 256): raise ValueError('invalid microsteps')
+                    self.cfg['motor_microsteps'] = val
+                elif parts[1:3] == ['MOTOR', 'PITCH'] and len(parts) == 4:
+                    self.cfg['screw_pitch_mm'] = numeric(parts[3], 0, 30)
                 elif parts[1:3] == ['MOTOR', 'RPM'] and len(parts) == 4:
                     self.cfg['motor_rpm'] = numeric(parts[3], 0, 150)
                 elif parts[1:3] == ['FILAMENT', 'TARGET'] and len(parts) == 4:
@@ -233,7 +268,7 @@ class Controller:
                 send(self.mega, 'GET_TEMP')
                 send(self.mega, 'MTEST,STATUS')
                 self.last_poll = now
-            if self.motor_test_active and (now - self.last_motor_keep > 1.1 or now - self.last_motor_status > 2.0):
+            if self.motor_test_active and (now - self.last_motor_keep > (0.65 if self.motor_jog else 1.1) or now - self.last_motor_status > 2.0):
                 self.stop_motor_test()
             if now - self.last_push >= .5:
                 self.publish()
