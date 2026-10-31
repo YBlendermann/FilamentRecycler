@@ -86,6 +86,11 @@ class Controller:
         self.pending = []
         self.last_ident = 0.0
         self.last_config_send = 0.0
+        self.motor_test_active = False
+        self.motor_step_hz = 200
+        self.motor_forward = True
+        self.last_motor_keep = 0.0
+        self.last_motor_status = 0.0
 
     def sync_mega(self):
         # Mega firmware accepts configuration ONLY; transmit gradually to avoid AVR UART overflow.
@@ -97,12 +102,21 @@ class Controller:
         self.pending.append(f'CFG,MOTOR,RPM,{self.cfg["motor_rpm"]:.2f}')
         self.pending.append(f'CFG,FILAMENT,TARGET,{self.cfg["filament_target_mm"]:.3f}')
 
+    def stop_motor_test(self):
+        # Stop regardless of our cached running state.
+        send(self.mega, 'MTEST,STOP')
+        self.motor_test_active = False
+
+    def publish_motor(self):
+        send(self.hmi, f'MOTOR,TEST,{int(self.motor_test_active)},{self.motor_step_hz},{int(self.motor_forward)}')
+
     def publish(self):
         t = ','.join('ERR' if x is None else f'{x:.1f}' for x in self.temps)
         sp = ','.join(f'{x:.1f}' for x in self.cfg['temperature_setpoints'])
         send(self.hmi, f'STATE,{self.mode},{int(self.mega_online)},{t},{sp},{self.cfg["motor_rpm"]:.2f},ERR,{self.cfg["filament_target_mm"]:.3f}')
         for i, values in enumerate(self.cfg['pid']):
             send(self.hmi, f'PID,{i},{values[0]:.3f},{values[1]:.3f},{values[2]:.3f}')
+        self.publish_motor()
 
     def process_mega(self, line):
         if line.startswith('ID,RAMPS_CONFIG,0.4'):
@@ -124,6 +138,18 @@ class Controller:
             self.temps = vals
             self.last_temp = time.monotonic()
             self.mega_online = True
+        elif line.startswith('MOTOR,TEST,'):
+            p = line.split(',')
+            if len(p) == 5:
+                try:
+                    self.motor_test_active = (p[2] == '1')
+                    self.motor_step_hz = int(p[3])
+                    self.motor_forward = (p[4] == '1')
+                    self.last_motor_status = time.monotonic()
+                except ValueError:
+                    pass
+        elif line.startswith('ACK,MTEST,TIMEOUT'):
+            self.motor_test_active = False
         elif line.startswith('ACK,') or line.startswith('ERR,'):
             print('Mega:', line, flush=True)
 
@@ -133,9 +159,34 @@ class Controller:
             return
         parts = line.split(',')
         try:
+            if len(parts) >= 2 and parts[0] == 'MTEST':
+                command = parts[1]
+                if command == 'STOP' and len(parts) == 2:
+                    self.stop_motor_test()
+                    send(self.hmi, 'ACK,MTEST,STOP')
+                elif command == 'KEEP' and len(parts) == 2:
+                    if self.motor_test_active:
+                        self.last_motor_keep = time.monotonic()
+                        send(self.mega, 'MTEST,KEEP')
+                elif command == 'START' and len(parts) == 4:
+                    if not self.mega_online or self.mode != 'READY' or self.motor_test_active:
+                        raise ValueError('test not allowed')
+                    hz = int(parts[2]); direction = int(parts[3])
+                    if not 50 <= hz <= 800 or direction not in (0, 1):
+                        raise ValueError('invalid test setting')
+                    self.motor_step_hz = hz
+                    self.motor_forward = bool(direction)
+                    self.motor_test_active = True
+                    self.last_motor_keep = time.monotonic()
+                    send(self.mega, f'MTEST,START,{hz},{direction}')
+                    send(self.hmi, 'ACK,MTEST,START_SENT')
+                else:
+                    raise ValueError('unknown motor test command')
+                self.publish_motor()
+                return
             if len(parts) >= 2 and parts[0] == 'ACTION':
                 action = parts[1]
-                if action == 'START' and self.mode in ('READY', 'PAUSED'):
+                if action == 'START' and self.mode in ('READY', 'PAUSED') and not self.motor_test_active:
                     self.mode = 'PREHEAT'  # simulated status, no actuation
                 elif action == 'PAUSE' and self.mode == 'PREHEAT':
                     self.mode = 'PAUSED'
@@ -170,6 +221,7 @@ class Controller:
         self.publish()
 
     def loop(self):
+        self.stop_motor_test()
         send(self.mega, 'HELLO')
         send(self.hmi, 'HELLO')
         while True:
@@ -179,7 +231,10 @@ class Controller:
                 self.last_ping = now
             if now - self.last_poll >= .5:
                 send(self.mega, 'GET_TEMP')
+                send(self.mega, 'MTEST,STATUS')
                 self.last_poll = now
+            if self.motor_test_active and (now - self.last_motor_keep > 1.1 or now - self.last_motor_status > 2.0):
+                self.stop_motor_test()
             if now - self.last_push >= .5:
                 self.publish()
                 self.last_push = now
@@ -193,7 +248,8 @@ class Controller:
             if self.last_temp and now - self.last_temp > 2.0:
                 self.temps = [None] * 3
                 self.mega_online = False
-                self.mode = 'READY'  # fail-safe logical state (actuators not implemented)
+                self.mode = 'READY'
+                if self.motor_test_active: self.stop_motor_test()
             time.sleep(.01)
 
 

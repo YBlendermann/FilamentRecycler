@@ -20,6 +20,10 @@ static const int GRAPH_N=60;
 static float actual[3]={NAN,NAN,NAN}, desired[3]={175,190,205};
 static float pid_cfg[3][3]={{5,.1,15},{5,.1,15},{5,.1,15}};
 static float rpm=12.5f, diameter=NAN, diameterTarget=1.75f;
+static bool motorTestRunning=false, motorTestForward=true;
+static int motorTestHz=200;
+static uint32_t motorTestBegin=0, lastMotorKeep=0;
+static lv_obj_t *motorTestLabel=nullptr, *motorSpeedLabel=nullptr, *motorDirLabel=nullptr;
 static float histT[3][GRAPH_N], histD[GRAPH_N];
 static int histIdx=0, histCount=0;
 static uint32_t lastHistory=0, lastState=0, lastHello=0;
@@ -108,6 +112,39 @@ static void showConfirm(const char* action){
 static void clickStart(lv_event_t*){showConfirm("START");}
 static void clickPause(lv_event_t*){showConfirm("PAUSE");}
 static void clickStop(lv_event_t*){showConfirm("STOP");}
+static void openMotorSettings(lv_event_t*){settingPage=FR_SET_MOTOR;page=FR_SETTINGS;drawPage();}
+static void updateMotorTestUi();
+static void changeTestSpeed(lv_event_t* e){
+  if(motorTestRunning)return;
+  int delta=(int)(intptr_t)lv_event_get_user_data(e);
+  motorTestHz+=delta;
+  if(motorTestHz<50)motorTestHz=50;
+  if(motorTestHz>800)motorTestHz=800;
+  updateMotorTestUi();
+}
+static void toggleMotorDirection(lv_event_t*){
+  if(motorTestRunning)return;
+  motorTestForward=!motorTestForward;
+  updateMotorTestUi();
+}
+static void stopMotorTest(lv_event_t*){sendLine("MTEST,STOP");}
+static void confirmMotorTest(lv_event_t*){
+  if(!piOnline || !megaOnline){closeDialog(nullptr);return;}
+  char cmd[48];snprintf(cmd,sizeof(cmd),"MTEST,START,%d,%d",motorTestHz,motorTestForward?1:0);
+  sendLine(cmd);
+  motorTestBegin=millis();lastMotorKeep=0;
+  closeDialog(nullptr);
+}
+static void startMotorTest(lv_event_t*){
+  if(dialog || !piOnline || !megaOnline || motorTestRunning)return;
+  dialog=panel(root,178,104,444,242,C_CARD);
+  lv_obj_move_foreground(dialog);
+  label(dialog,"E0-MOTORTEST STARTEN?",20,17,C_ORANGE,true);
+  label(dialog,"Nur ohne Last. Motorstrom/VREF vorher pruefen!",20,66,C_TEXT);
+  label(dialog,"Max. 15 s; Stop jederzeit. Keine Heizfreigabe.",20,104,C_MUTED);
+  button(dialog,"Abbrechen",20,178,187,44,0x2A343E,closeDialog);
+  button(dialog,"Start bestaetigen",231,178,192,44,C_GREEN,confirmMotorTest);
+}
 static void updateEditorLabel(){
   if(!editVal)return;
   char buf[32];snprintf(buf,sizeof(buf),"%.3f",editNumber);lv_label_set_text(editVal,buf);
@@ -225,7 +262,9 @@ static void chipIcon(lv_obj_t* p,int x,int y,uint32_t c){
   iconDot(chip,6,5,6,c);
 }
 static void sidebarLink(int y,const char* glyph,const char* txt,FrPage target,bool active){
-  lv_obj_t* b=button(root,txt,4,y,99,47,active?0x2A343E:C_BG,nav,(void*)(intptr_t)target);
+  lv_obj_t* b=button(root,txt,4,y,99,47,active?0x2A343E:C_BG,
+                       !strcmp(txt,"Motor")?openMotorSettings:nav,
+                       (void*)(intptr_t)target);
   lv_obj_t* a=label(b,glyph,8,15,C_ORANGE);
   lv_obj_t* l=lv_obj_get_child(b,0);
   if(l){lv_obj_align(l,LV_ALIGN_LEFT_MID,36,0);lv_obj_set_style_text_font(l,LV_FONT_DEFAULT,0);}
@@ -250,7 +289,9 @@ static void drawFooter(){
 static void dashCardBase(int x,int y,int w,int h,const char* title,uint32_t accent,FrPage dest){
   lv_obj_t* p=panel(root,x,y,w,h,C_CARD);
   lv_obj_add_flag(p,LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(p,nav,LV_EVENT_CLICKED,(void*)(intptr_t)dest);
+  if(dest==FR_SETTINGS && !strcmp(title,"Extruder-Foerderung"))
+    lv_obj_add_event_cb(p,openMotorSettings,LV_EVENT_CLICKED,nullptr);
+  else lv_obj_add_event_cb(p,nav,LV_EVENT_CLICKED,(void*)(intptr_t)dest);
   label(p,title,33,10,C_TEXT);
   label(p,LV_SYMBOL_RIGHT,w-18,10,C_MUTED);
   if(dest==FR_TEMP)thermoIcon(p,12,9,accent);
@@ -270,6 +311,7 @@ static void drawDashboard(){
   // Row 1: shared 3-zone card, feeding card and cooling card.
   dashCardBase(115,58,272,173,"Extruder-Temperaturen",C_ORANGE,FR_TEMP);
   dashCardBase(394,58,247,173,"Extruder-Foerderung",C_ORANGE,FR_SETTINGS);
+
   dashCardBase(648,58,141,173,"Kuehlstrecke",C_ORANGE,FR_SETTINGS);
   // Row 2: filament + machine status.
   dashCardBase(115,238,329,187,"Filamentdurchmesser",C_ORANGE,FR_FILAMENT);
@@ -364,12 +406,17 @@ static void drawSettings(){
       button(p,"Aendern",423,115+i*65,141,43,C_BLUE,onEdit,(void*)(intptr_t)(200+i));
     }
   }else if(settingPage==FR_SET_MOTOR){
-    label(p,"FOERDERSCHNECKE",20,18,C_TEXT,true);
-    label(p,"Betrieb: TESTMODUS / Ausgaenge gesperrt",20,80,C_RED);
-    label(p,"Soll-Drehzahl",20,140,C_MUTED);
-    detailLabels[0]=label(p,"--",235,132,C_TEXT,true);
-    button(p,"Aendern",423,126,141,52,C_BLUE,onEdit,(void*)(intptr_t)300);
-    label(p,"Foerdermenge: wird spaeter kalibriert",20,230,C_MUTED);
+    label(p,"E0 - TMC2208 MOTORTEST",19,12,C_TEXT,true);
+    label(p,"STEP-Frequenz (kein gemessener RPM-Wert)",19,55,C_MUTED);
+    button(p,"-50",18,85,100,47,0x2A343E,changeTestSpeed,(void*)(intptr_t)-50);
+    motorSpeedLabel=label(p,"200 STEP/s",159,92,C_ORANGE,true);
+    button(p,"+50",450,85,120,47,0x2A343E,changeTestSpeed,(void*)(intptr_t)50);
+    label(p,"Drehrichtung (nur im Stillstand)",19,145,C_MUTED);
+    button(p,"Richtung wechseln",19,171,200,43,0x2A343E,toggleMotorDirection);
+    motorDirLabel=label(p,"Vorwaerts",252,177,C_TEXT);
+    button(p,LV_SYMBOL_PLAY " MOTOR START",19,236,244,52,C_GREEN,startMotorTest);
+    button(p,LV_SYMBOL_STOP " MOTOR STOP",278,236,286,52,C_RED,stopMotorTest);
+    motorTestLabel=label(p,"Teststatus: --",20,311,C_MUTED);
   }else{
     label(p,"SYSTEM",20,17,C_TEXT,true);
     detailLabels[0]=label(p,"Raspberry Pi: --",20,90,C_TEXT);
@@ -409,6 +456,7 @@ static void drawPage(){
   memset(graphCharts,0,sizeof(graphCharts));
   memset(graphSeries,0,sizeof(graphSeries));
   dialog=nullptr;editVal=nullptr;statusLabel=nullptr;
+  motorTestLabel=nullptr;motorSpeedLabel=nullptr;motorDirLabel=nullptr;
   switch(page){
     case FR_DASH:drawDashboard();break;
     case FR_TEMP:drawTemperature();break;
@@ -420,8 +468,14 @@ static void drawPage(){
   updateDisplay();
 }
 static void setLabel(lv_obj_t* o,const char* str){if(o)lv_label_set_text(o,str);}
+static void updateMotorTestUi(){
+  char buf[56];snprintf(buf,sizeof(buf),"%d STEP/s",motorTestHz);setLabel(motorSpeedLabel,buf);
+  setLabel(motorDirLabel,motorTestForward?"Vorwaerts":"Rueckwaerts");
+  setLabel(motorTestLabel,motorTestRunning?"Teststatus: MOTOR LAEUFT":"Teststatus: MOTOR AUS");
+}
 static void updateDisplay(){
   char buf[80];
+  updateMotorTestUi();
   if(statusLabel){
     const char *m=!strcmp(machineMode,"READY")?"BEREIT":!strcmp(machineMode,"PREHEAT")?"VORHEIZEN":!strcmp(machineMode,"PAUSED")?"PAUSE":machineMode;
     snprintf(buf,sizeof(buf),"%s",piOnline?m:"PI OFFLINE");
@@ -484,6 +538,15 @@ static void addHistory(){
 static void processLine(char *line){
   if(!strcmp(line,"HELLO")){sendLine("ID,HMI,0.4");return;}
   if(!strcmp(line,"ACK,SAVED"))return;
+  if(!strncmp(line,"MOTOR,TEST,",11)){
+    int state=0,hz=0,dir=0;
+    if(sscanf(line,"MOTOR,TEST,%d,%d,%d",&state,&hz,&dir)==3){
+      motorTestRunning=(state==1);
+      if(motorTestRunning){motorTestHz=hz;motorTestForward=dir==1;}
+      updateMotorTestUi();
+    }
+    return;
+  }
   if(strncmp(line,"PID,",4)==0){
     int i;float kp,ki,kd;
     if(sscanf(line,"PID,%d,%f,%f,%f",&i,&kp,&ki,&kd)==4 && i>=0&&i<3){
@@ -518,6 +581,10 @@ static void filament_ui_begin(){
   page=FR_DASH;drawPage();sendLine("HELLO");
 }
 static void filament_ui_poll(){
+  if(motorTestRunning && piOnline && (uint32_t)(millis()-motorTestBegin)<15000UL &&
+     (uint32_t)(millis()-lastMotorKeep)>=350UL){
+    lastMotorKeep=millis();sendLine("MTEST,KEEP");
+  }
   int budget=192;
   while(budget-- && fr_uart.available()){
     char c=(char)fr_uart.read();
@@ -530,6 +597,7 @@ static void filament_ui_poll(){
   if((uint32_t)(millis()-lastHello)>3000){lastHello=millis();sendLine("HELLO");}
   if(piOnline && (uint32_t)(millis()-lastState)>2500){
     piOnline=false;megaOnline=false;
+    motorTestRunning=false;
     for(int i=0;i<3;i++)actual[i]=NAN;
     updateDisplay();
   }

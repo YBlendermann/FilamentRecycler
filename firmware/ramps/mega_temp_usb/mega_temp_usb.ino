@@ -1,6 +1,7 @@
 /* FilamentRecycler V0.4 - Arduino Mega 2560 / RAMPS 1.6
  * Three NTC thermistors + volatile configuration received from Raspberry Pi.
- * SAFETY: No motor or heater output pins configured. START does not actuate anything.
+ * SAFETY: Heating outputs remain OFF. E0 motor output ONLY for timed, confirmed manual test.
+ * No extrusion sequence is connected to motor tests.
  */
 #include <Arduino.h>
 #include <math.h>
@@ -15,6 +16,37 @@ float pid[3][3] = {{5,.1,15},{5,.1,15},{5,.1,15}};
 float motorRPM = 12.5f, filamentTarget = 1.75f;
 char cmd[96]; uint8_t cmdLen = 0;
 unsigned long lastSample = 0;
+// RAMPS 1.6 E0 pin map (Mega2560), TMC2208 STEP/DIR standalone
+const uint8_t E0_STEP=26, E0_DIR=28, E0_ENABLE=24;
+const uint16_t TEST_MIN_HZ=50, TEST_MAX_HZ=800;
+const unsigned long TEST_MAX_MS=15000UL;
+const unsigned long TEST_WATCHDOG_MS=1300UL;
+bool testRunning=false, testForward=true;
+uint16_t testHz=200;
+unsigned long testStart=0, testKeep=0, lastStepUs=0, lastMotorReport=0;
+void stopTest() {
+  testRunning=false;
+  digitalWrite(E0_ENABLE,HIGH);
+  digitalWrite(E0_STEP,LOW);
+}
+void reportMotor() {
+  Serial.print(F("MOTOR,TEST,")); Serial.print(testRunning?1:0);
+  Serial.print(','); Serial.print(testHz);
+  Serial.print(','); Serial.println(testForward?1:0);
+}
+void motorTick() {
+  if(!testRunning) return;
+  unsigned long now=millis();
+  if(now-testStart >= TEST_MAX_MS || now-testKeep >= TEST_WATCHDOG_MS){
+    stopTest(); Serial.println(F("ACK,MTEST,TIMEOUT")); return;
+  }
+  unsigned long us=micros();
+  if((uint32_t)(us-lastStepUs)>=1000000UL/testHz){
+    lastStepUs=us;
+    digitalWrite(E0_STEP,HIGH); delayMicroseconds(4); digitalWrite(E0_STEP,LOW);
+  }
+}
+
 
 float readTemperature(uint8_t pin) {
   analogRead(pin); // discard first conversion after channel change
@@ -48,6 +80,28 @@ void handle(char *line) {
   if(!strcmp(line,"HELLO")) { Serial.println(F("ID,RAMPS_CONFIG,0.4")); return; }
   if(!strcmp(line,"PING")) { Serial.println(F("PONG")); return; }
   if(!strcmp(line,"GET_TEMP")) { sendTemps(); return; }
+  if(!strcmp(line,"MTEST,STOP")) { stopTest(); Serial.println(F("ACK,MTEST,STOP")); reportMotor(); return; }
+  if(!strcmp(line,"MTEST,KEEP")) {
+    if(testRunning) testKeep=millis();
+    return;
+  }
+  if(!strcmp(line,"MTEST,STATUS")) { reportMotor(); return; }
+  if(!strncmp(line,"MTEST,START,",12)) {
+    // START,stepHz,direction (direction 0 or 1); reject malformed commands.
+    // Never allow motor to start on a stale or incomplete request.
+    unsigned int rate=0; int direction=-1; char tail='x';
+    if(sscanf(line,"MTEST,START,%u,%d%c",&rate,&direction,&tail)==2 &&
+       rate>=TEST_MIN_HZ && rate<=TEST_MAX_HZ &&
+       (direction==0 || direction==1) && !testRunning) {
+      testHz=(uint16_t)rate; testForward=(direction==1);
+      digitalWrite(E0_DIR,testForward?HIGH:LOW);
+      delayMicroseconds(20);
+      testStart=testKeep=millis(); lastStepUs=micros();
+      digitalWrite(E0_ENABLE,LOW); testRunning=true;
+      Serial.println(F("ACK,MTEST,START")); reportMotor();
+    } else Serial.println(F("ERR,MTEST,START"));
+    return;
+  }
   if(!strncmp(line,"CFG,",4)) {
     char *parts[6]={}; uint8_t n=0;
     char *ctx=nullptr;
@@ -78,12 +132,21 @@ void handle(char *line) {
   Serial.println(F("ERR,UNKNOWN"));
 }
 void setup(){
+  digitalWrite(E0_ENABLE,HIGH);
+  digitalWrite(E0_STEP,LOW);
+  digitalWrite(E0_DIR,LOW);
+  pinMode(E0_ENABLE,OUTPUT);
+  pinMode(E0_STEP,OUTPUT);
+  pinMode(E0_DIR,OUTPUT);
+  stopTest();
   Serial.begin(115200);
   analogReference(DEFAULT);
   sample(); lastSample=millis();
 }
 void loop(){
   if(millis()-lastSample>=500) { lastSample=millis(); sample(); }
+  motorTick();
+  if(millis()-lastMotorReport>=450){lastMotorReport=millis();reportMotor();}
   while(Serial.available()) {
     char c=(char)Serial.read();
     if(c=='\n') { cmd[cmdLen]=0; handle(cmd); cmdLen=0; }
