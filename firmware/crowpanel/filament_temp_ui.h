@@ -1,5 +1,5 @@
 #pragma once
-/* FilamentRecycler HMI V0.4 - CrowPanel DIS07050H V3.0, LVGL 9.
+/* FilamentRecycler HMI V0.5 - dark layout - CrowPanel DIS07050H V3.0, LVGL 9.
  * Included in Elecrow reference sketch after hardware initialization.
  * All actuator actions are SIMULATED by the Pi and confirmed on screen.
  */
@@ -12,10 +12,10 @@
 #include <string.h>
 
 static HardwareSerial fr_uart(0);
-static const uint32_t C_BG=0xFFFFFF, C_TEXT=0x141A22, C_MUTED=0x687584;
-static const uint32_t C_CARD=0xF7F9FC, C_LINE=0xDEE5ED, C_BLUE=0x1677EB;
-static const uint32_t C_RED=0xE34646, C_ORANGE=0xED921B, C_GREEN=0x159859;
-static const uint32_t C_Z[3]={0xDE4949,0xE99420,0x1677EB};
+static const uint32_t C_BG=0x0C1319, C_TEXT=0xF6F7F9, C_MUTED=0xA1AFB9;
+static const uint32_t C_CARD=0x161F27, C_LINE=0x34434E, C_BLUE=0xFF7925;
+static const uint32_t C_RED=0xE73D45, C_ORANGE=0xFF7925, C_GREEN=0x159859;
+static const uint32_t C_Z[3]={0xFF7925,0xF3B33A,0xE9474C};
 static const int GRAPH_N=60;
 static float actual[3]={NAN,NAN,NAN}, desired[3]={175,190,205};
 static float pid_cfg[3][3]={{5,.1,15},{5,.1,15},{5,.1,15}};
@@ -34,6 +34,7 @@ static FrSetting settingPage=FR_SET_TEMP;
 static int selectedZone=0;
 static lv_obj_t *root=nullptr, *statusLabel=nullptr;
 static lv_obj_t *dashboardValue[6]={}, *detailLabels[7]={};
+static lv_obj_t *dashAux[12]={}, *feedValue[3]={}, *coolValue=nullptr;
 static lv_obj_t *charts[4]={}, *graphCharts[2]={};
 static lv_chart_series_t *chartSeries[4]={}, *graphSeries[2]={};
 static lv_obj_t *dialog=nullptr, *editVal=nullptr;
@@ -95,13 +96,13 @@ static void confirmAction(lv_event_t*){
 static void showConfirm(const char* action){
   if(dialog)return;
   snprintf(pendingAction,sizeof(pendingAction),"%s",action);
-  dialog=panel(root,178,104,444,242,0xFFFFFF);
+  dialog=panel(root,178,104,444,242,C_CARD);
   lv_obj_move_foreground(dialog);
   label(dialog,"PROZESSBESTAETIGUNG",22,18,C_ORANGE,true);
   label(dialog,!strcmp(action,"START")?"Prozess wirklich starten?":
       !strcmp(action,"STOP")?"Prozess wirklich stoppen?":"Prozess pausieren?",22,76,C_TEXT);
   label(dialog,"Testmodus: Es werden keine Ausgaenge aktiviert.",22,112,C_MUTED);
-  button(dialog,"Abbrechen",20,177,187,46,0xE8EDF3,closeDialog);
+  button(dialog,"Abbrechen",20,177,187,46,0x2A343E,closeDialog);
   button(dialog,"Bestaetigen",238,177,187,46,!strcmp(action,"STOP")?C_RED:C_GREEN,confirmAction);
 }
 static void clickStart(lv_event_t*){showConfirm("START");}
@@ -128,14 +129,14 @@ static void openEditor(const char* title,const char* command,float value,float m
   if(dialog)return;
   editNumber=value;editMin=minV;editMax=maxV;editStep=step;
   snprintf(editCmd,sizeof(editCmd),"%s",command);
-  dialog=panel(root,196,98,410,254,0xFFFFFF);
+  dialog=panel(root,196,98,410,254,C_CARD);
   lv_obj_move_foreground(dialog);
   label(dialog,title,20,17,C_TEXT,true);
   label(dialog,"Wert einstellen",22,60,C_MUTED);
-  button(dialog,"-",36,99,76,55,0xE8EDF3,adjustEditor,(void*)(intptr_t)-1);
+  button(dialog,"-",36,99,76,55,0x2A343E,adjustEditor,(void*)(intptr_t)-1);
   editVal=label(dialog,"",153,114,C_TEXT,true);updateEditorLabel();
-  button(dialog,"+",296,99,76,55,0xE8EDF3,adjustEditor,(void*)(intptr_t)1);
-  button(dialog,"Abbrechen",20,188,172,46,0xE8EDF3,closeDialog);
+  button(dialog,"+",296,99,76,55,0x2A343E,adjustEditor,(void*)(intptr_t)1);
+  button(dialog,"Abbrechen",20,188,172,46,0x2A343E,closeDialog);
   button(dialog,"Speichern",216,188,172,46,C_BLUE,saveEditor);
 }
 // Code (1xx): temperature, (2xx): PID; (300): RPM; (400): filament target.
@@ -156,7 +157,7 @@ static void onEdit(lv_event_t* e){
 }
 static lv_obj_t* addChart(lv_obj_t* parent,int x,int y,int w,int h,int type,bool full){
   lv_obj_t* chart=lv_chart_create(parent);lv_obj_set_pos(chart,x,y);lv_obj_set_size(chart,w,h);
-  lv_obj_set_style_bg_color(chart,lv_color_hex(0xFFFFFF),0);
+  lv_obj_set_style_bg_color(chart,lv_color_hex(C_CARD),0);
   lv_obj_set_style_bg_opa(chart,LV_OPA_COVER,0);
   lv_obj_set_style_border_width(chart,0,0);
   lv_obj_set_style_pad_all(chart,4,0);
@@ -182,55 +183,148 @@ static void fillChart(lv_obj_t* chart,lv_chart_series_t* series,int type){
 static void graphButton(lv_event_t* e){
   page=(FrPage)(intptr_t)lv_event_get_user_data(e);drawPage();
 }
+// Industrial iconography drawn with native LVGL geometry so no external icon font is needed.
+static lv_obj_t* iconDot(lv_obj_t* parent,int x,int y,int size,uint32_t color){
+  lv_obj_t* d=lv_obj_create(parent);
+  lv_obj_set_pos(d,x,y);lv_obj_set_size(d,size,size);
+  lv_obj_set_style_radius(d,LV_RADIUS_CIRCLE,0);
+  lv_obj_set_style_bg_color(d,lv_color_hex(color),0);
+  lv_obj_set_style_bg_opa(d,LV_OPA_COVER,0);
+  lv_obj_set_style_border_width(d,0,0);lv_obj_set_style_pad_all(d,0,0);
+  lv_obj_clear_flag(d,LV_OBJ_FLAG_SCROLLABLE);
+  return d;
+}
+static void thermoIcon(lv_obj_t* p,int x,int y,uint32_t c){
+  lv_obj_t* stem=panel(p,x+6,y,8,22,c);
+  lv_obj_set_style_border_width(stem,0,0);
+  lv_obj_set_style_radius(stem,6,0);
+  iconDot(p,x+2,y+16,17,c);
+  iconDot(p,x+6,y+20,9,C_CARD);
+  iconDot(p,x+8,y+22,5,c);
+}
+static void fanIcon(lv_obj_t* p,int x,int y,uint32_t c){
+  iconDot(p,x+8,y+8,7,c);
+  iconDot(p,x+7,y-1,10,c);
+  iconDot(p,x+16,y+9,10,c);
+  iconDot(p,x-1,y+12,10,c);
+  iconDot(p,x+10,y+10,3,C_CARD);
+}
+static void metricIcon(lv_obj_t* p,int x,int y,uint32_t c){
+  lv_obj_t* ring=iconDot(p,x,y,20,c);
+  lv_obj_set_style_bg_opa(ring,LV_OPA_TRANSP,0);
+  lv_obj_set_style_border_width(ring,2,0);
+  lv_obj_set_style_border_color(ring,lv_color_hex(c),0);
+  label(p,"/",x+5,y-2,c);
+}
+static void gearIcon(lv_obj_t* p,int x,int y,uint32_t c){label(p,LV_SYMBOL_SETTINGS,x,y,c,true);}
+static void chipIcon(lv_obj_t* p,int x,int y,uint32_t c){
+  lv_obj_t* chip=panel(p,x,y,20,19,C_CARD);
+  lv_obj_set_style_radius(chip,3,0);
+  lv_obj_set_style_border_color(chip,lv_color_hex(c),0);
+  lv_obj_set_style_border_width(chip,2,0);
+  iconDot(chip,6,5,6,c);
+}
+static void sidebarLink(int y,const char* glyph,const char* txt,FrPage target,bool active){
+  lv_obj_t* b=button(root,txt,4,y,99,47,active?0x2A343E:C_BG,nav,(void*)(intptr_t)target);
+  lv_obj_t* a=label(b,glyph,8,15,C_ORANGE);
+  lv_obj_t* l=lv_obj_get_child(b,0);
+  if(l){lv_obj_align(l,LV_ALIGN_LEFT_MID,36,0);lv_obj_set_style_text_font(l,LV_FONT_DEFAULT,0);}
+  (void)a;
+}
 static void drawHeader(const char* title,bool back){
-  panel(root,0,0,800,55,0xFFFFFF);
-  if(back)button(root,"<",12,8,43,38,0xE8EDF3,nav,(void*)(intptr_t)FR_DASH);
-  label(root,title,back?64:20,14,C_TEXT,true);
-  statusLabel=label(root,"PI OFFLINE",595,18,C_RED);
+  panel(root,0,0,800,51,C_BG);
+  if(back)button(root,LV_SYMBOL_LEFT,10,5,38,38,0x2A343E,nav,(void*)(intptr_t)FR_DASH);
+  label(root,title,back?55:17,12,C_TEXT,true);
+  // Actual runtime status is set by updateDisplay().
+  statusLabel=label(root,"PI OFFLINE",650,15,C_RED);
+  lv_obj_t* sep=panel(root,0,49,800,1,C_LINE);
+  lv_obj_set_style_border_width(sep,0,0);
 }
 static void drawFooter(){
   if(page!=FR_DASH)return;
-  button(root,"STARTEN",19,414,239,53,C_GREEN,clickStart);
-  button(root,"PAUSE",280,414,240,53,C_ORANGE,clickPause);
-  button(root,"STOP",542,414,239,53,C_RED,clickStop);
+  // Control buttons only. Confirmation dialog remains mandatory.
+  button(root,LV_SYMBOL_PLAY " Starten",115,432,214,40,C_ORANGE,clickStart);
+  button(root,LV_SYMBOL_PAUSE " Pause",343,432,214,40,0x29343D,clickPause);
+  button(root,LV_SYMBOL_STOP " Stop",571,432,215,40,0x75262D,clickStop);
 }
-static void dashCard(int index,const char* name,int x,int y,int w,int h,uint32_t accent){
-  lv_obj_t* p=panel(root,x,y,w,h);
-  label(p,name,12,10,accent);
-  dashboardValue[index]=label(p,"--",12,35,C_TEXT,true);
-  if(index<3){
-    label(p,"Ist / Soll",12,71,C_MUTED);
-    addChart(p,13,94,w-26,60,index,false);
-    lv_obj_add_event_cb(p,nav,LV_EVENT_CLICKED,(void*)(intptr_t)FR_TEMP);
-  }else if(index==4){
-    addChart(p,13,79,w-26,65,3,false);
-    lv_obj_add_event_cb(p,nav,LV_EVENT_CLICKED,(void*)(intptr_t)FR_FILAMENT);
-  }else{
-    lv_obj_add_event_cb(p,nav,LV_EVENT_CLICKED,(void*)(intptr_t)(index==3?FR_SETTINGS:FR_SETTINGS));
-  }
+static void dashCardBase(int x,int y,int w,int h,const char* title,uint32_t accent,FrPage dest){
+  lv_obj_t* p=panel(root,x,y,w,h,C_CARD);
   lv_obj_add_flag(p,LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(p,nav,LV_EVENT_CLICKED,(void*)(intptr_t)dest);
+  label(p,title,33,10,C_TEXT);
+  label(p,LV_SYMBOL_RIGHT,w-18,10,C_MUTED);
+  if(dest==FR_TEMP)thermoIcon(p,12,9,accent);
+  else if(dest==FR_FILAMENT)metricIcon(p,10,9,accent);
+  else if(dest==FR_SETTINGS)gearIcon(p,10,9,accent);
+  else fanIcon(p,10,9,accent);
 }
 static void drawDashboard(){
   drawHeader("FilamentRecycler",false);
-  dashCard(0,"ZONE 1 - EINGANG",15,64,250,176,C_Z[0]);
-  dashCard(1,"ZONE 2 - MITTE",275,64,250,176,C_Z[1]);
-  dashCard(2,"ZONE 3 - DUESE",535,64,250,176,C_Z[2]);
-  dashCard(3,"FOERDERSCHNECKE",15,248,250,157,C_GREEN);
-  dashCard(4,"FILAMENTDURCHMESSER",275,248,250,157,C_BLUE);
-  dashCard(5,"SYSTEM / EINSTELLUNGEN",535,248,250,157,C_MUTED);
+  // Narrow 108 px sidebar and five compact cards on the 800x480 screen.
+  panel(root,0,51,108,429,0x101920);
+  sidebarLink(64,LV_SYMBOL_HOME,"Home",FR_DASH,true);
+  sidebarLink(115,LV_SYMBOL_CHARGE,"Temp",FR_TEMP,false);
+  sidebarLink(166,LV_SYMBOL_SETTINGS,"Motor",FR_SETTINGS,false);
+  sidebarLink(217,LV_SYMBOL_EYE_OPEN,"Filament",FR_FILAMENT,false);
+  sidebarLink(268,LV_SYMBOL_SETTINGS,"Setup",FR_SETTINGS,false);
+  // Row 1: shared 3-zone card, feeding card and cooling card.
+  dashCardBase(115,58,272,173,"Extruder-Temperaturen",C_ORANGE,FR_TEMP);
+  dashCardBase(394,58,247,173,"Extruder-Foerderung",C_ORANGE,FR_SETTINGS);
+  dashCardBase(648,58,141,173,"Kuehlstrecke",C_ORANGE,FR_SETTINGS);
+  // Row 2: filament + machine status.
+  dashCardBase(115,238,329,187,"Filamentdurchmesser",C_ORANGE,FR_FILAMENT);
+  dashCardBase(451,238,338,187,"Systemstatus",C_ORANGE,FR_SETTINGS);
+  // Temperature zone readouts and three overlaid micro history charts.
+  const int xx[3]={127,217,308};
+  const char* zname[3]={"Einzug","Mitte","Duese"};
+  for(int i=0;i<3;i++){
+    label(root,zname[i],xx[i],92,C_MUTED);
+    dashboardValue[i]=label(root,"--",xx[i],112,C_Z[i],true);
+    dashAux[i]=label(root,"Soll: --",xx[i],142,C_MUTED);
+    lv_obj_t* mini=addChart(root,126+i*88,175,78,43,i,false);
+    lv_obj_add_event_cb(mini,nav,LV_EVENT_CLICKED,(void*)(intptr_t)FR_TEMP);
+  }
+  // Feed data: show only available measurements, never fabricate a flow rate.
+  label(root,"Schnecke",408,93,C_MUTED);
+  dashboardValue[3]=label(root,"-- rpm",408,113,C_ORANGE,true);
+  label(root,"Foerdermenge",515,93,C_MUTED);
+  feedValue[0]=label(root,"-- g/min",515,115,C_ORANGE);
+  label(root,"Filamentzug",408,155,C_MUTED);
+  feedValue[1]=label(root,"-- m/min",408,176,C_ORANGE);
+  label(root,"Soll-RPM",522,155,C_MUTED);
+  feedValue[2]=label(root,"-- rpm",522,176,C_TEXT);
+  // Cooling fan percentage unavailable until hardware module is installed.
+  fanIcon(root,699,96,C_ORANGE);
+  coolValue=label(root,"-- %",684,138,C_ORANGE,true);
+  label(root,"Luefter",689,171,C_MUTED);
+  // Diameter chart and target.
+  label(root,"Ist",129,275,C_MUTED);
+  dashboardValue[4]=label(root,"-- mm",129,292,C_ORANGE,true);
+  label(root,"Soll",276,275,C_MUTED);
+  dashAux[3]=label(root,"1.75 mm",276,294,C_TEXT);
+  addChart(root,129,340,298,66,3,false);
+  // Status card: compact, legible system flags.
+  label(root,"Mega",468,277,C_MUTED);
+  dashboardValue[5]=label(root,"--",593,277,C_TEXT);
+  label(root,"Raspberry Pi",468,309,C_MUTED);
+  dashAux[4]=label(root,"--",593,309,C_TEXT);
+  label(root,"Temperatursensoren",468,341,C_MUTED);
+  dashAux[5]=label(root,"--",650,341,C_TEXT);
+  label(root,"Aktoren",468,373,C_MUTED);
+  label(root,"TEST / AUS",593,373,C_ORANGE);
   drawFooter();
 }
 static void drawTemperature(){
   drawHeader("Temperaturen",true);
   for(int i=0;i<3;i++){
     char name[30];snprintf(name,sizeof(name),"Zone %d",i+1);
-    button(root,name,12,75+i*60,130,52,i==selectedZone?C_BLUE:0xE8EDF3,chooseZone,(void*)(intptr_t)i);
+    button(root,name,12,75+i*60,130,52,i==selectedZone?C_BLUE:0x2A343E,chooseZone,(void*)(intptr_t)i);
   }
   lv_obj_t* p=panel(root,155,65,631,325);
   detailLabels[0]=label(p,"Ist: --",18,14,C_TEXT,true);
   detailLabels[1]=label(p,"Soll: --",320,18,C_MUTED);
   addChart(p,18,65,590,195,selectedZone,true);
-  button(p,"Graph gross",18,273,155,41,0xE8EDF3,graphButton,(void*)(intptr_t)FR_GRAPH_TEMP);
+  button(p,"Graph gross",18,273,155,41,0x2A343E,graphButton,(void*)(intptr_t)FR_GRAPH_TEMP);
   button(p,"Sollwert aendern",352,273,255,41,C_BLUE,onEdit,(void*)(intptr_t)(100+selectedZone));
 }
 static void drawFilament(){
@@ -239,14 +333,14 @@ static void drawFilament(){
   detailLabels[0]=label(p,"Aktuell: --",20,17,C_TEXT,true);
   detailLabels[1]=label(p,"Soll: --",360,22,C_MUTED);
   addChart(p,20,75,728,195,3,true);
-  button(p,"Graph gross",20,274,180,42,0xE8EDF3,graphButton,(void*)(intptr_t)FR_GRAPH_DIA);
+  button(p,"Graph gross",20,274,180,42,0x2A343E,graphButton,(void*)(intptr_t)FR_GRAPH_DIA);
   button(p,"Sollwert einstellen",476,274,270,42,C_BLUE,onEdit,(void*)(intptr_t)400);
   label(root,"Sensor noch nicht vorhanden: Istwert bleibt --",24,410,C_MUTED);
 }
 static void drawSettings(){
   drawHeader("Einstellungen",true);
   const char* names[]={"Temperaturen","PID-Regler","Motor","System"};
-  for(int i=0;i<4;i++)button(root,names[i],12,76+i*77,170,65,i==(int)settingPage?C_BLUE:0xE8EDF3,
+  for(int i=0;i<4;i++)button(root,names[i],12,76+i*77,170,65,i==(int)settingPage?C_BLUE:0x2A343E,
       chooseSetting,(void*)(intptr_t)i);
   lv_obj_t* p=panel(root,194,65,592,355);
   if(settingPage==FR_SET_TEMP){
@@ -261,7 +355,7 @@ static void drawSettings(){
     label(p,"PID-PARAMETER",18,13,C_TEXT,true);
     for(int i=0;i<3;i++){
       char name[16];snprintf(name,sizeof(name),"Zone %d",i+1);
-      button(p,name,18+i*185,54,175,45,i==selectedZone?C_BLUE:0xE8EDF3,chooseZone,(void*)(intptr_t)i);
+      button(p,name,18+i*185,54,175,45,i==selectedZone?C_BLUE:0x2A343E,chooseZone,(void*)(intptr_t)i);
     }
     const char* names2[]={"Kp - Proportional","Ki - Integral","Kd - Differential"};
     for(int i=0;i<3;i++){
@@ -282,7 +376,7 @@ static void drawSettings(){
     detailLabels[1]=label(p,"Arduino Mega: --",20,136,C_TEXT);
     label(p,"Parameter: auf Raspberry Pi gespeichert",20,190,C_MUTED);
     label(p,"Aktoren in dieser Version deaktiviert",20,235,C_RED);
-    button(p,"Material / Spule (Vorschau)",22,279,337,45,0xE8EDF3,nav,(void*)(intptr_t)FR_MATERIAL);
+    button(p,"Material / Spule (Vorschau)",22,279,337,45,0x2A343E,nav,(void*)(intptr_t)FR_MATERIAL);
   }
 }
 static void drawGraph(){
@@ -307,6 +401,8 @@ static void drawPage(){
   lv_obj_set_style_bg_opa(root,LV_OPA_COVER,0);
   lv_obj_clear_flag(root,LV_OBJ_FLAG_SCROLLABLE);
   memset(dashboardValue,0,sizeof(dashboardValue));
+  memset(dashAux,0,sizeof(dashAux));
+  memset(feedValue,0,sizeof(feedValue));coolValue=nullptr;
   memset(detailLabels,0,sizeof(detailLabels));
   memset(charts,0,sizeof(charts));
   memset(chartSeries,0,sizeof(chartSeries));
@@ -328,21 +424,31 @@ static void updateDisplay(){
   char buf[80];
   if(statusLabel){
     const char *m=!strcmp(machineMode,"READY")?"BEREIT":!strcmp(machineMode,"PREHEAT")?"VORHEIZEN":!strcmp(machineMode,"PAUSED")?"PAUSE":machineMode;
-    snprintf(buf,sizeof(buf),"%s | %s",piOnline?"PI OK":"PI OFFLINE",m);
+    snprintf(buf,sizeof(buf),"%s",piOnline?m:"PI OFFLINE");
     setLabel(statusLabel,buf);
     lv_obj_set_style_text_color(statusLabel,lv_color_hex(!piOnline?C_RED:!strcmp(machineMode,"PREHEAT")?C_ORANGE:C_GREEN),0);
   }
   if(page==FR_DASH){
     for(int i=0;i<3;i++){
       if(isfinite(actual[i]))snprintf(buf,sizeof(buf),"%.1f C",actual[i]);
-      else snprintf(buf,sizeof(buf),"SENSOR ERR");
+      else snprintf(buf,sizeof(buf),"ERR");
       setLabel(dashboardValue[i],buf);
+      snprintf(buf,sizeof(buf),"Soll %.0f C",desired[i]);setLabel(dashAux[i],buf);
     }
-    snprintf(buf,sizeof(buf),"%.1f rpm",rpm);setLabel(dashboardValue[3],buf);
+    // Only command target, not measured RPM: until encoder feedback exists.
+    setLabel(dashboardValue[3],"-- rpm");
+    setLabel(feedValue[0],"-- g/min");setLabel(feedValue[1],"-- m/min");
+    snprintf(buf,sizeof(buf),"%.1f",rpm);setLabel(feedValue[2],buf);
+    setLabel(coolValue,"-- %");
     if(isfinite(diameter))snprintf(buf,sizeof(buf),"%.2f mm",diameter);
-    else snprintf(buf,sizeof(buf),"Sensor fehlt");
+    else snprintf(buf,sizeof(buf),"-- mm");
     setLabel(dashboardValue[4],buf);
-    snprintf(buf,sizeof(buf),"Mega %s",megaOnline?"ONLINE":"OFFLINE");setLabel(dashboardValue[5],buf);
+    snprintf(buf,sizeof(buf),"%.2f mm",diameterTarget);setLabel(dashAux[3],buf);
+    setLabel(dashboardValue[5],megaOnline?"ONLINE":"OFFLINE");
+    setLabel(dashAux[4],piOnline?"ONLINE":"OFFLINE");
+    bool sensors=megaOnline;
+    for(int i=0;i<3;i++)sensors &= isfinite(actual[i]);
+    setLabel(dashAux[5],sensors?"OK":"PRUEFEN");
   }else if(page==FR_TEMP || page==FR_GRAPH_TEMP){
     snprintf(buf,sizeof(buf),"Ist: %s",isfinite(actual[selectedZone])?"":"ERR");
     if(isfinite(actual[selectedZone]))snprintf(buf,sizeof(buf),"Ist: %.1f C",actual[selectedZone]);
