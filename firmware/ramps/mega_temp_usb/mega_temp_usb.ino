@@ -7,6 +7,8 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <avr/interrupt.h>
+#include <util/atomic.h>
 
 const uint8_t TEMP_PIN[3] = {A13, A15, A14};
 const float R_NOMINAL = 100000.0f, T_NOMINAL = 25.0f, BETA = 3950.0f, R_PULLUP = 4700.0f;
@@ -27,10 +29,48 @@ const uint16_t RAMP_MIN=100, RAMP_MAX=5000; // STEP/s per second
 bool testRunning=false, testForward=true, testJog=false;
 uint16_t targetHz=200, rampHzPerSec=500;
 float currentHz=0.0f;
-unsigned long testStart=0, testKeep=0, lastStepUs=0, lastMotorReport=0, lastRampUs=0;
+unsigned long testStart=0, testKeep=0, lastMotorReport=0, lastRampUs=0;
+// Timer1 CTC, 100 us period at 16 MHz with prescaler 8.
+// Hardware-scheduled STEP ticks: serial traffic and NTC reads cannot stall stepping.
+volatile uint16_t isrStepHz = 0;
+volatile uint16_t isrPhase = 0;
+volatile uint16_t isrMainAgeTicks = 0;
+volatile bool isrStarved = false;
+ISR(TIMER1_COMPA_vect) {
+  if (isrMainAgeTicks < 30000) ++isrMainAgeTicks;
+  // Main loop must still be responsive. Hard step cut after 500 ms.
+  if (isrMainAgeTicks >= 5000) { isrStarved = true; isrStepHz = 0; return; }
+  uint16_t hz = isrStepHz;
+  if (!hz) return;
+  uint16_t phase = isrPhase + hz;
+  if (phase >= 10000) {
+    phase -= 10000;
+    digitalWrite(E0_STEP, HIGH);
+    delayMicroseconds(4);
+    digitalWrite(E0_STEP, LOW);
+  }
+  isrPhase = phase;
+}
+void beginStepTimer() {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1 = 0;
+    OCR1A = 199;
+    TIFR1 = _BV(OCF1A);
+    TCCR1B = _BV(WGM12) | _BV(CS11);
+    isrPhase = 0; isrStepHz = 0; isrMainAgeTicks = 0; isrStarved = false;
+    TIMSK1 |= _BV(OCIE1A);
+  }
+}
+
 
 void stopTest() {
   testRunning=false; testJog=false; currentHz=0;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    TIMSK1 &= ~_BV(OCIE1A);
+    isrStepHz = 0;
+  }
   digitalWrite(E0_ENABLE,HIGH);
   digitalWrite(E0_STEP,LOW);
 }
@@ -43,28 +83,29 @@ void reportMotor() {
   Serial.print(','); Serial.println(rampHzPerSec);
 }
 void motorTick() {
-  if(!testRunning)return;
-  unsigned long ms=millis();
-  if(ms-testStart>=TEST_MAX_MS ||
-     ms-testKeep>=(testJog?JOG_WATCHDOG_MS:TIMED_WATCHDOG_MS)) {
-    stopTest(); Serial.println(F("ACK,MTEST,TIMEOUT"));return;
+  if (!testRunning) return;
+  // Keep the local timer-alive guard fresh. Serial/ADC operations in this loop
+  // do not affect STEP edge timing while they execute.
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { isrMainAgeTicks = 0; }
+  if (isrStarved) {
+    stopTest(); Serial.println(F("ACK,MTEST,LOOP_STALL")); return;
   }
-  unsigned long us=micros();
-  unsigned long dt=us-lastRampUs;
-  if(dt>=1000UL){
-    // Fixed acceleration in STEP/s^2; time based and non-blocking.
-    float delta=(float)rampHzPerSec * ((float)dt/1000000.0f);
-    currentHz=fminf((float)targetHz,currentHz+delta);
+  unsigned long ms = millis();
+  if (ms-testStart >= TEST_MAX_MS) {
+    stopTest(); Serial.println(F("ACK,MTEST,LIMIT")); return;
+  }
+  if (ms-testKeep >= (testJog ? JOG_WATCHDOG_MS : TIMED_WATCHDOG_MS)) {
+    stopTest(); Serial.println(F("ACK,MTEST,WATCHDOG")); return;
+  }
+  unsigned long us = micros();
+  unsigned long dt = us-lastRampUs;
+  if (dt >= 5000UL) {
+    currentHz=fminf((float)targetHz,currentHz+(float)rampHzPerSec*((float)dt/1000000.0f));
     lastRampUs=us;
-  }
-  if(currentHz<1.0f)return;
-  unsigned long interval=(unsigned long)(1000000.0f/currentHz);
-  if((unsigned long)(us-lastStepUs)>=interval){
-    lastStepUs=us;
-    digitalWrite(E0_STEP,HIGH); delayMicroseconds(4);digitalWrite(E0_STEP,LOW);
+    uint16_t newHz=(uint16_t)(currentHz+0.5f);
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { isrStepHz = newHz; }
   }
 }
-
 
 float readTemperature(uint8_t pin) {
   analogRead(pin); // discard first conversion after channel change
@@ -117,7 +158,8 @@ void handle(char *line) {
       rampHzPerSec=(uint16_t)acceleration;testJog=(mode==1);
       digitalWrite(E0_DIR,testForward?HIGH:LOW);
       delayMicroseconds(20);
-      testStart=testKeep=millis();lastStepUs=lastRampUs=micros();currentHz=0.0f;
+      testStart=testKeep=millis();lastRampUs=micros();currentHz=0.0f;
+      beginStepTimer();
       digitalWrite(E0_ENABLE,LOW);testRunning=true;
       Serial.println(F("ACK,MTEST,START"));reportMotor();
     } else Serial.println(F("ERR,MTEST,START"));

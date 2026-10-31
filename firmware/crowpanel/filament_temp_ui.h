@@ -125,6 +125,9 @@ static void changeTestSpeed(lv_event_t* e){
   motorTestHz+=delta;
   if(motorTestHz<50)motorTestHz=50;
   if(motorTestHz>2500)motorTestHz=2500;
+  char cmd[40];
+  snprintf(cmd,sizeof(cmd),"MTEST,SET_HZ,%d",motorTestHz);
+  sendLine(cmd);
   updateMotorTestUi();
 }
 static void toggleMotorDirection(lv_event_t*){

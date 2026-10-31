@@ -21,6 +21,7 @@ DEFAULT = {
     "motor_gear_ratio": 20.0,
     "screw_pitch_mm": 0.0,  # 0: unknown; calculated axial advance hidden
     "motor_ramp_hz_s": 500,
+    "motor_test_step_hz": 200,
     "filament_target_mm": 1.75,
 }
 BAUD = 115200
@@ -55,6 +56,8 @@ def load_config(path):
     numeric(config['motor_gear_ratio'], 1, 200)
     numeric(config['screw_pitch_mm'], 0, 30)
     numeric(config['motor_ramp_hz_s'], 100, 5000)
+    if int(config['motor_test_step_hz']) not in range(50, 2501, 50):
+        raise ValueError('Invalid motor test step frequency')
     numeric(config['filament_target_mm'], 1, 3)
     return config
 
@@ -98,12 +101,13 @@ class Controller:
         self.last_ident = 0.0
         self.last_config_send = 0.0
         self.motor_test_active = False
-        self.motor_step_hz = 200
+        self.motor_step_hz = int(self.cfg["motor_test_step_hz"])
         self.motor_forward = True
         self.motor_current_hz = 0
         self.motor_jog = False
         self.last_motor_keep = 0.0
         self.last_motor_status = 0.0
+        self.awaiting_motor_start_until = 0.0
 
     def sync_mega(self):
         # Mega firmware accepts configuration ONLY; transmit gradually to avoid AVR UART overflow.
@@ -121,6 +125,7 @@ class Controller:
         self.motor_test_active = False
         self.motor_current_hz = 0
         self.motor_jog = False
+        self.awaiting_motor_start_until = 0.0
 
     def publish_motor(self):
         rpm = self.motor_current_hz * 60.0 / (self.cfg['motor_steps_per_rev'] * self.cfg['motor_microsteps'] * self.cfg['motor_gear_ratio'])
@@ -162,17 +167,27 @@ class Controller:
             p = line.split(',')
             if len(p) == 8:
                 try:
-                    self.motor_test_active = (p[2] == '1')
-                    self.motor_step_hz = int(p[3])
-                    self.motor_forward = (p[4] == '1')
+                    running = (p[2] == '1')
+                    # A queued pre-START idle report must not cancel a just-sent
+                    # START. Otherwise periodic STATUS traffic drops KEEP heartbeats.
+                    if not running and time.monotonic() < self.awaiting_motor_start_until:
+                        return
+                    if running:
+                        self.awaiting_motor_start_until = 0.0
+                        self.motor_step_hz = int(p[3])
+                        self.motor_forward = (p[4] == '1')
+                    # Idle status from Mega must never overwrite HMI target STEP/s.
+                    self.motor_test_active = running
                     self.motor_current_hz = int(p[5])
                     self.motor_jog = (p[6] == '1')
                     self.last_motor_status = time.monotonic()
                 except ValueError:
                     pass
-        elif line.startswith('ACK,MTEST,TIMEOUT'):
+        elif line.startswith(('ACK,MTEST,TIMEOUT', 'ACK,MTEST,LIMIT', 'ACK,MTEST,WATCHDOG', 'ACK,MTEST,LOOP_STALL', 'ERR,MTEST,START')):
             self.motor_test_active = False
             self.motor_current_hz = 0
+            self.awaiting_motor_start_until = 0.0
+            print('Mega stopped motor:', line, flush=True)
         elif line.startswith('ACK,') or line.startswith('ERR,'):
             print('Mega:', line, flush=True)
 
@@ -191,6 +206,16 @@ class Controller:
                     if self.motor_test_active and ((command == 'HOLD') == self.motor_jog):
                         self.last_motor_keep = time.monotonic()
                         send(self.mega, 'MTEST,' + command)
+                elif command == 'SET_HZ' and len(parts) == 3:
+                    if self.motor_test_active:
+                        raise ValueError('cannot change speed during run')
+                    hz = int(parts[2])
+                    if not 50 <= hz <= 2500 or hz % 50:
+                        raise ValueError('invalid STEP/s')
+                    self.motor_step_hz = hz
+                    self.cfg['motor_test_step_hz'] = hz
+                    save_config(self.path, self.cfg)
+                    send(self.hmi, 'ACK,MTEST,SET_HZ')
                 elif command == 'START' and len(parts) == 6:
                     if not self.mega_online or self.mode != 'READY' or self.motor_test_active:
                         raise ValueError('test not allowed')
@@ -199,12 +224,15 @@ class Controller:
                     if not 50 <= hz <= 2500 or direction not in (0, 1) or not 100 <= accel <= 5000 or jog not in (0, 1):
                         raise ValueError('invalid test setting')
                     self.motor_step_hz = hz
+                    self.cfg['motor_test_step_hz'] = hz
+                    save_config(self.path, self.cfg)
                     self.motor_forward = bool(direction)
                     self.motor_test_active = True
                     self.motor_jog = bool(jog)
                     self.motor_current_hz = 0
                     self.last_motor_keep = time.monotonic()
                     self.last_motor_status = time.monotonic()
+                    self.awaiting_motor_start_until = time.monotonic() + 0.8
                     send(self.mega, f'MTEST,START,{hz},{direction},{accel},{jog}')
                     send(self.hmi, 'ACK,MTEST,START_SENT')
                 else:
